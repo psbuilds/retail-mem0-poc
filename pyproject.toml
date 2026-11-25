@@ -1,0 +1,27 @@
+[project]
+name = "retail-memory-assistant"
+version = "0.1.0"
+description = "Retail Memory Shopping Assistant POC — Mem0 Cloud MCP, LangGraph, Ollama, FastAPI, Streamlit"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.165.0",
+    "uvicorn[standard]==0.54.0",
+    "streamlit==1.67.0",
+    "langgraph==1.2.23",
+    "mcp==2.3.0",
+    "pydantic==2.14.3",
+    "pydantic-settings==2.16.3",
+    "python-dotenv==1.2.4",
+    "httpx==0.28.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+    "pytest-asyncio==1.5.0",
+]
+
+[tool.uv]
+# This repository is an application, not a distributable package.
+package = false

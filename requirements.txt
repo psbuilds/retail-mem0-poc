@@ -1,0 +1,27 @@
+# Retail Memory Shopping Assistant — pip-compatible dependency list.
+# The reproducible source of truth is pyproject.toml + uv.lock; prefer `uv sync`.
+# Keep this file in sync if dependencies change, for users without uv.
+# Versions are pinned to what the project was built and tested with (Python 3.13).
+
+# Product catalogue API
+fastapi==0.165.0
+uvicorn[standard]==0.54.0
+
+# Chatbot UI
+streamlit==1.67.0
+
+# Agent workflow
+langgraph==1.2.23
+
+# Mem0 Cloud MCP (official Python MCP client, Streamable HTTP transport)
+mcp==2.3.0
+
+# Configuration and HTTP
+pydantic==2.14.3
+pydantic-settings==2.16.3
+python-dotenv==1.2.4
+httpx==0.28.1
+
+# Testing
+pytest==9.2.0
+pytest-asyncio==1.5.0
