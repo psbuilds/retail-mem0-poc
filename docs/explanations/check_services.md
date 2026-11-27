@@ -39,7 +39,8 @@ Prints a formatted section header.
 Prints:
 - Mem0: configured, connected, message, discovered tools;
 - Ollama: status message and whether `llama3.1` is installed;
-- Product API: online and product count, or the real error.
+- Product API: online and product count, or the real error;
+- Query router: Jev mode or deterministic rules mode.
 
 Returns `1` if any service is unavailable, else `0`. Missing Mem0 credentials
 count as a failure so the report is honest.
@@ -52,11 +53,13 @@ actual live tool contract is inspected.
 ### `live_memory_test(customer_id) -> int`
 Real write/read/isolation/delete probe:
 
-1. `add_memory(customer_id, <labelled probe>)`.
-2. `search_memories(customer_id, "test-brand headphones")`; requires the probe in
+1. `add_memory(customer_id, <labelled probe>)`, which returns an `event_id`.
+2. `wait_for_event(event_id)` until Mem0 reports `SUCCEEDED` (a `PENDING` timeout
+   is a failure here).
+3. `search_memories(customer_id, "test-brand headphones")`; requires the probe in
    results.
-3. `search_memories(other_customer, ...)`; requires **no** probe result.
-4. Deletes the probe by memory id when an id is returned.
+4. `search_memories(other_customer, ...)`; requires **no** probe result.
+5. Deletes the probe by memory id when an id is returned.
 
 Each step prints `OK`/`FAIL`/`WARN` and returns non-zero on failure. If cleanup is
 impossible it warns rather than pretending success.
@@ -98,7 +101,8 @@ uv run python scripts/check_services.py --live-memory-test --customer customer_0
 ```
 ```
 Adding probe memory for customer_001 ...
-OK add_memory
+Waiting for Mem0 event <event-id> ...
+OK add_memory event SUCCEEDED
 Searching for the probe as the same customer ...
 OK search_memories returned the probe
 Checking isolation by searching as customer_001_isolation_probe ...

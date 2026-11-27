@@ -54,11 +54,12 @@ Returns the customer's chat container, creating it with a fresh session id and
 empty message list when absent. Ensures one session id per conversation.
 
 ### `render_status_sidebar() -> None`
+Renders Mem0 MCP, Ollama, the product API and the **query router** (Jev ready or
+`Deterministic rules mode`). Each entry shows online/unavailable plus the real
+status message.
 - Provides a "Check connections" button.
 - On the first render it automatically calls `check_services()` once and caches
   the result, so every rerun does not reconnect to MCP/Ollama.
-- Shows `st.success`/`st.error` plus the real message for Mem0 MCP, Ollama and the
-  product API.
 - Lists discovered Mem0 tools in an expander when connected.
 
 ### `render_memory_sidebar(customer_id: str) -> None`
@@ -86,12 +87,14 @@ separators), brand, rating, wireless/wired, noise cancellation and features.
 It reads only catalogue fields; it does not compute or invent anything.
 
 ### `render_assistant_message(message: dict) -> None`
-Renders:
-- reply text;
-- product cards;
-- a green "Saved to Mem0: …" notice only for confirmed writes;
+Renders the reply, product cards, memory outcome and diagnostics:
+
+- `Saved to Mem0` only for confirmed writes;
+- a warning listing writes Mem0 is still processing;
+- an error listing failed memory operations;
 - "Nothing new to remember" when the write report says so;
 - a caption when remembered preferences were relaxed;
+- a route caption (`intent`, `source`, product/memory flags);
 - a Diagnostics expander with errors, statuses and resolved requirements.
 
 ### `render_chat(customer_id: str) -> None`
@@ -100,8 +103,8 @@ Renders:
 - Appends the user message and displays it.
 - Calls `process_message(customer_id, chat["session_id"], prompt)` inside a
   spinner.
-- Stores the assistant message with recommendations and metadata, renders it, and
-  caps the list at 200 messages.
+- Stores the assistant message with recommendations, route, memory actions and
+  metadata, renders it, and caps the list at 200 messages.
 - Invalidates the cached memory list when something was saved, so the sidebar
   refreshes on the next run.
 

@@ -46,7 +46,7 @@ run; only the network session is fake.
 
 | Test | Verifies |
 |---|---|
-| `test_tool_discovery` | discovers the five tools and the real required args |
+| `test_tool_discovery` | discovers the seven tools used by the fake transport and their required args |
 | `test_add_memory_adapts_to_schema` | sends `messages`, not `text`, because the schema requires messages; sends `user_id` |
 | `test_search_memory_is_scoped_to_customer` | filters contain the customer id |
 | `test_another_customer_cannot_see_memories` | different customer gets no records |
@@ -55,7 +55,7 @@ run; only the network session is fake.
 | `test_delete_memory_verifies_ownership` | owner deletes successfully |
 | `test_delete_foreign_memory_is_refused` | foreign id → error and no deletion |
 | `test_delete_all_memories_is_customer_scoped` | only that customer's records removed |
-| `test_update_memory_verifies_ownership` | missing `update_memory` tool is reported honestly |
+| `test_update_memory_verifies_ownership` | ownership is verified, then the text is updated |
 | `test_missing_api_key_is_reported` | status not configured; add fails with setup message |
 | `test_authentication_failure_is_classified` | 401 becomes an authentication error |
 | `test_missing_scope_argument_is_refused` | schema without user scope is refused |
@@ -63,20 +63,29 @@ run; only the network session is fake.
 | `test_not_configured_client_raises` | real transport raises `Mem0NotConfiguredError` |
 | `test_extract_raw_records_handles_wrapped_payloads` | parses top-level/nested result shapes |
 
+| `test_add_memory_returns_event_and_wait_succeeds` | add returns `event_id` + `PENDING`; polling reaches `SUCCEEDED` with text |
+| `test_event_timeout_is_pending_not_success` | timeout keeps `PENDING`, `ok=False`, timeout message |
+| `test_failed_event_surfaces_its_error` | `FAILED` status and Mem0 error are surfaced |
+
 Memory-manager tests (also mocked):
-- temporary candidates are not saved;
-- temporary wording is rejected even when mislabeled persistent;
-- budget-only candidates need stable wording (one-off rejected, usual budget kept);
-- persistent preference is saved;
-- duplicate preference is skipped;
-- write failure produces `failures` and `status="error"`.
+- temporary statements are rejected by policy and never written;
+- one-off budgets are rejected while a usual budget is accepted;
+- vague statements are rejected;
+- a persistent preference is saved only after its event completes;
+- a `PENDING` event is reported as pending, never saved;
+- a `FAILED` event is reported as a failure;
+- a tool failure produces `failures` and `status="error"`;
+- delete corrections target only matching records;
+- replace corrections rewrite the brand in the stored text;
+- a correction with no matching record changes nothing (`not_found`);
+- an invented memory id cannot be deleted.
 
 ## 6. Live test
 
 `test_live_mem0_add_search_isolation_and_delete`:
 1. skips if `MEM0_API_KEY` is unset;
 2. connects and lists tools;
-3. adds a labelled probe memory for a unique customer;
+3. adds a labelled probe memory for a unique customer (returns an event id);
 4. waits briefly (hosted extraction may be asynchronous);
 5. searches as the same customer and requires the probe;
 6. searches as a different customer and requires no probe;

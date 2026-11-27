@@ -61,24 +61,21 @@ def test_scenario_save_then_recall_across_sessions(
                 "is_shopping_request": False
             },
             "Suggest headphones for me.": {"is_shopping_request": True},
-        },
-        preferences=[
-            {
-                "text": "Usually prefers Sony headphones with noise cancellation.",
-                "kind": "persistent",
-                "confidence": 0.95,
-            }
-        ],
+        }
     )
     graph = build_e2e_graph(real_product_service, memory, llm, settings)
+    message = "I usually prefer Sony headphones with noise cancellation."
 
     saved = process_message(
         "customer_001",
         "conversation-1",
-        "I usually prefer Sony headphones with noise cancellation.",
+        message,
         graph=graph,
     )
-    assert saved.memory_saved == ["Usually prefers Sony headphones with noise cancellation."]
+    # Mem0 owns extraction; the app stores the customer's sentence and only
+    # reports it once the asynchronous event has completed.
+    assert saved.memory_saved == [message]
+    assert saved.memory_actions[0]["status"] == "saved"
 
     # A brand-new session must rely on Mem0 (here: the fake store) rather than
     # the previous LangGraph thread.
@@ -105,13 +102,6 @@ def test_scenario_override_and_temporary_budget(
             "brand": "JBL",
             "max_budget": 3000,
         },
-        preferences=[
-            {
-                "text": "Wants JBL headphones for this purchase.",
-                "kind": "temporary",
-                "confidence": 0.9,
-            }
-        ],
     )
     graph = build_e2e_graph(real_product_service, memory, llm, settings)
 

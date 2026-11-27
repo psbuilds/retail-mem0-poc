@@ -39,6 +39,16 @@ Important attributes:
 | `mem0_mcp_url` | `https://mcp.mem0.ai/mcp` | Official hosted MCP endpoint |
 | `mem0_api_key` | `""` | Secret key; `repr=False` so it is not printed |
 | `mem0_timeout_seconds` | `30.0` | MCP timeout |
+| `typesafe_api_key` | `""` | Secret Jev key; `repr=False` |
+| `jev_base_url` | `https://api.typesafe.ai/v1/systemone` | System One endpoint |
+| `jev_model` | `jev-latest` | Jev model alias |
+| `jev_timeout_seconds` | `2.0` | Router timeout before rules fallback |
+| `jev_retry_attempts` | `1` | Additional attempts on timeout/429/5xx |
+| `router_use_jev` | `True` | Set false to force rules mode |
+| `router_confidence_threshold` | `0.5` | Noul/Choice threshold |
+| `router_send_history_turns` | `2` | Prior turns sent to Jev |
+| `memory_event_timeout_seconds` | `15.0` | Max wait for an async Mem0 write |
+| `memory_event_poll_interval_seconds` | `1.0` | Event polling interval |
 | `app_env` | `development` | Environment label |
 | `max_recommendations` | `5` | Ranking limit |
 | `memory_top_k` | `20` | Memory search/list limit |
@@ -49,9 +59,13 @@ Methods/properties:
 True when a non-blank key exists. It does **not** validate the key; validation
 requires a real connection.
 
+#### `jev_configured` (property) → `bool`
+True when a non-blank `TYPESAFE_API_KEY` exists. It does not validate the key.
+
 #### `startup_warnings() -> list[str]`
-Returns human-readable warnings, currently a missing `MEM0_API_KEY`. The message
-never contains the key value. Used by diagnostics/UI.
+Returns human-readable warnings: a missing `MEM0_API_KEY` and a missing
+`TYPESAFE_API_KEY` (the router then runs in deterministic rules mode). Messages
+never contain key values. Used by diagnostics/UI.
 
 ## 4. Functions and methods
 

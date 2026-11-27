@@ -23,13 +23,13 @@ No test classes. Helper `_sony_memories()` returns a fake memory store with:
 |---|---|---|
 | `test_new_customer_without_memories` | empty memory | `memory_status="empty"`, headphones returned |
 | `test_existing_customer_preferences_are_applied` | Sony/ANC memories, generic request | every recommendation is Sony + ANC, resolved brand Sony |
-| `test_current_request_overrides_persistent_memory` | Sony memories, JBL ≤3000 message, temporary preference candidates | brand/budget resolved from current request; all results JBL ≤3000; nothing saved; skip reasons mention temporary; fake store unchanged |
-| `test_persistent_preference_is_saved` | persistent candidate | `memory_saved` equals the preference; fake add logged for that customer |
+| `test_current_request_overrides_persistent_memory` | Sony memories, JBL ≤3000 "this time" message | brand/budget resolved from current request; all results JBL ≤3000; no memory action; fake store unchanged |
+| `test_persistent_preference_is_saved` | durable preference statement | path is manage → generate → finalize; `memory_saved` equals the message after its event completes; fake add logged for that customer |
 | `test_follow_up_conversation_context` | per-message LLM outputs, same session | wireless persists, then Sony, then budget 5000; results Sony ≤5000 wireless |
 | `test_new_session_does_not_reuse_conversation_but_keeps_memories` | memory + two sessions | fresh session still applies Sony (from memory), not previous chat constraints |
-| `test_memory_retrieval_failure_continues` | `fail_search=True` | `memory_status="error"`, products still recommended, writes skipped, diagnostic present |
+| `test_memory_retrieval_failure_continues` | `fail_search=True`, "for me" request | `memory_status="error"`, products still recommended, nothing saved, diagnostic present |
 | `test_product_api_failure_does_not_fabricate_products` | `FakeProductService(fail=True)` | `product_status="error"`, no recommendations, explicit catalogue error |
-| `test_ollama_failure_is_reported_and_fallback_used` | `fail_json`/`fail_chat` | deterministic Sony/wireless ≤5000 result, `llm_status="error"`, response says LLM unavailable, memory writes error |
+| `test_ollama_failure_is_reported_and_fallback_used` | `fail_json`/`fail_chat` | deterministic Sony/wireless ≤5000 result, `llm_status="error"`, response says LLM unavailable |
 | `test_empty_message_is_rejected` | whitespace | `ok=False`, friendly response |
 | `test_invalid_identifiers_are_rejected` | empty/invalid ids | `ok=False` |
 | `test_heuristic_requirement_parser` (parametrised) | 3 messages | category/budget parsing for 3k, ₹2,299, no budget |

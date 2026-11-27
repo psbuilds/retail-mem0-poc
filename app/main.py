@@ -27,12 +27,20 @@ def _print_response(result: ChatResponse) -> None:
                 f"  - {product['name']} | ₹{product['price']:,} | "
                 f"rating {product['rating']} | {product['product_id']}"
             )
+    route = result.route or {}
+    if route:
+        print(
+            f"[route={route.get('intent')} | source={route.get('source')} | "
+            f"kind={result.response_kind} | tokens={route.get('input_tokens', "-")}]"
+        )
     print(
         f"\n[memory={result.memory_status} | llm={result.llm_status} | "
         f"products={result.product_status}]"
     )
     if result.memory_saved:
         print(f"[saved to Mem0: {json.dumps(result.memory_saved)}]")
+    if result.memory_pending:
+        print(f"[pending in Mem0 (not confirmed): {json.dumps(result.memory_pending)}]")
     if result.errors:
         print("[errors]")
         for error in result.errors:

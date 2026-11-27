@@ -1,160 +1,133 @@
-# Memory workflow — Mem0 Cloud over MCP
+# Memory workflow
 
-## Verified service contract
+## 1. Ownership
 
-Before implementation, the official Mem0 documentation was consulted:
+| Layer | Owns |
+|---|---|
+| `memory_client.py` | MCP session, auth, tool discovery, schema adaptation |
+| `memory_service.py` | Scoped operations, event polling, isolation |
+| `memory_manager.py` | Durable-vs-temporary policy, correction planning, truthful reporting |
+| `nodes.manage_memory` | Deciding which operations the turn needs |
+| Mem0 | Extraction, deduplication, merging, superseding |
 
-- Hosted endpoint: `https://mcp.mem0.ai/mcp`
-- Transport: **Streamable HTTP** (`mcp.client.streamable_http`)
-- API-key auth header: `Authorization: Token <MEM0_API_KEY>`
-- Tools: `add_memory`, `search_memories`, `get_memories`, `get_memory`,
-  `update_memory`, `delete_memory`, `delete_all_memories`, `delete_entities`,
-  `list_entities`, plus event tools.
+Mem0's `add_memory` runs with `infer=true`, so the application no longer runs an
+Ollama preference-extraction pipeline or `SequenceMatcher` duplicate detection.
 
-The Python MCP SDK is used (`mcp==2.3.0`). The Mem0 SDK and direct REST calls are
-not used anywhere.
+## 2. Verified MCP tools
 
-Tool input schemas are discovered at runtime with `list_tools()`. Arguments are
-adapted to the discovered schema (`build_arguments`), so the app does not guess
-whether `add_memory` expects `messages` or `text`, or whether `get_memories`
-accepts `filters`.
+Discovered live from `https://mcp.mem0.ai/mcp`:
 
-## Connection lifecycle
+`add_memory`, `search_memories`, `get_memories`, `get_memory`, `update_memory`,
+`delete_memory`, `delete_all_memories`, `delete_entities`, `list_entities`,
+`list_events`, `get_event_status`.
+
+Key schemas:
+
+| Tool | Input |
+|---|---|
+| `add_memory` | `text` or `messages`, `user_id`, `metadata`, `infer` (all optional) |
+| `search_memories` | `query`, `filters`, `top_k`, `threshold`, `rerank` |
+| `update_memory` | `memory_id` (required), `text`, `metadata` |
+| `delete_memory` | `memory_id` (required) |
+| `get_event_status` | `event_id` (required) |
+
+`add_memory` returns `{"event_id": "...", "status": "PENDING"}`; the memory is
+created asynchronously. `get_event_status` returns
+`status` (`PENDING`/`SUCCEEDED`/`FAILED`), `results[].id` (created memory ids),
+`results[].data.memory` (stored text) and `error`.
+
+## 3. Write flow
 
 ```mermaid
 sequenceDiagram
-    participant App as memory_service
-    participant Cli as Mem0MCPClient
-    participant Task as background session task
-    participant MCP as mcp.mem0.ai
+    participant N as manage_memory
+    participant MM as MemoryManager
+    participant MS as MemoryService
+    participant M as Mem0 MCP
 
-    App->>Cli: list_tools()
-    Cli->>Cli: start daemon loop thread (once)
-    Cli->>Task: run _runner(ready)
-    Task->>MCP: POST initialize (Authorization: Token ...)
-    MCP-->>Task: session established
-    Task->>MCP: tools/list
-    MCP-->>Task: tool names + input schemas
-    Task-->>Cli: ready
-    Cli-->>App: ToolInfo list
-    App->>Cli: call_tool("search_memories", args)
-    Cli->>Task: queue operation
-    Task->>MCP: tools/call
-    MCP-->>Task: result
-    Task-->>App: normalised payload
+    N->>MM: should_store(message)
+    alt rejected
+        MM-->>N: skipped + reason
+    else accepted
+        N->>MM: store(text)
+        MM->>MS: add_memory(text, infer=true)
+        MS->>M: add_memory
+        M-->>MS: event_id (PENDING)
+        loop until terminal or timeout
+            MS->>M: get_event_status(event_id)
+            M-->>MS: PENDING / SUCCEEDED / FAILED
+        end
+        MM-->>N: saved / pending / failed
+    end
 ```
 
-Design points:
-- One MCP session per process, owned by a single background asyncio task. The
-  session and its anyio task group must stay in one task; queueing operations to
-  that task satisfies this and lets Streamlit reruns reuse the connection.
-- Requests block with a timeout (`MEM0_TIMEOUT_SECONDS`, default 30s).
-- Connection/auth errors are classified into `Mem0NotConfiguredError`,
-  `Mem0AuthenticationError` or `Mem0MCPError` and returned to callers as failed
-  `MemoryResult`s (never silent success).
-- The key is never logged; only its presence is reported.
+- Timeout (`MEMORY_EVENT_TIMEOUT_SECONDS`, default 15 s) is reported as
+  `pending`, never `saved`.
+- A missing `event_id` is reported as `pending` with an explanation that
+  completion could not be verified.
+- The UI shows saved, pending and failed outcomes separately.
 
-## Operations
+## 4. Policy
 
-| Application method | MCP tool | Scope |
-|---|---|---|
-| `add_memory(customer, text)` | `add_memory` | `user_id=customer`, `messages`/`text` per schema |
-| `search_memories(customer, query)` | `search_memories` | `filters={"AND":[{"user_id": customer}]}` |
-| `list_memories(customer)` | `get_memories` | same filter, page/page_size |
-| `update_memory(customer, id, text)` | `update_memory` | ownership verified first |
-| `delete_memory(customer, id)` | `delete_memory` | ownership verified first |
-| `delete_all_memories(customer)` | `delete_all_memories` | customer filter, confirmation candidate |
+`MemoryManager.should_store` rejects:
 
-If the discovered schema accepts neither `user_id` nor `filters`, the service
-refuses the operation. That is deliberate: an unscoped call could read or delete
-another customer's memories.
+- temporary scope (`this time`, `as a gift`, `for my trip`, ...);
+- withdrawal wording (`forget`, `stop remembering`);
+- one-off budgets without product context or stable wording;
+- statements without stable-preference language.
 
-## Customer isolation
+Accepted text is the customer's sentence; Mem0 extracts the structured memory.
+The confirmation uses the text returned by the completed event when available.
 
-1. `customer_id` is used as the Mem0 `user_id` on every write.
-2. Every read includes an `AND` filter with that `user_id`.
-3. Returned records that name a different `user_id` are discarded defensively.
-4. Update/delete call `get_memories` and require the memory id to be present in the
-   customer's scope before mutating it.
-5. A test simulates a server returning two users' records and asserts only the
-   owner's record is surfaced.
+## 5. Corrections
 
-The UI also keys chat history and memory panels by customer, so switching customers
-never displays the previous customer's data.
-
-## Persistent vs temporary preferences
-
-Extraction (Ollama) proposes candidates; rules (Python) decide.
-
-**Stored (`persistent`):**
-- preferred brands: "Usually prefers Sony headphones."
-- product type: "Prefers over-ear headphones."
-- features: "Always prefers wireless headphones with noise cancellation."
-- usual budget: "Usually has a budget around ₹5,000."
-
-**Not stored (`temporary`):**
-- "Budget of ₹3,000 for this purchase."
-- "Wants JBL instead of Sony this time."
-- "Looking for a gift."
-- "Needs headphones for an upcoming trip."
-- "Wants black for this order."
-
-Deterministic guard (`memory_manager.py`):
-- reject `kind != "persistent"`;
-- reject temporary markers ("this time", "this purchase", "for a gift", "trip",
-  "today", etc.);
-- require at least 8 normalised characters;
-- require stable-preference wording ("usually", "prefer", "always", ...) unless the
-  model's confidence is ≥ 0.7;
-- reject budget-only sentences unless they use stable wording (so "Budget under
-  ₹3,000" is skipped, while "Usually has a budget around ₹5,000" is kept);
-- reject near-duplicates (`SequenceMatcher ≥ 0.82` or ≥ 90% token overlap) against
-  retrieved memories and earlier candidates in the same batch.
-
-The assistant stores at most three preferences per turn. It does not store every
-message, and it does not infer preferences from a single ambiguous request.
-
-## Precedence and memory
-
-For each requirement field:
-
-1. current explicit message value;
-2. previous conversation value (only for a refinement, same category);
-3. memory-derived hint;
-4. application default (`headphones`).
-
-Memory fills only fields the customer did not set. Memory-derived
-wireless/noise-cancellation filters may be relaxed if they would make the explicit
-request impossible; the UI and LLM prompt are told about the relaxation. Memory
-never overrides an explicit brand, budget or category.
-
-## Failure behaviour
-
-| Failure | Behaviour |
-|---|---|
-| No API key | `not_configured`; UI shows setup message; no writes claimed |
-| Bad key / 401 | `error` with the authentication failure; no invented memories |
-| Timeout / server down | `error`; recommendations continue without memory |
-| Tool missing | explicit "server does not expose …" error |
-| Invalid result payload | parsed defensively; empty list rather than fabricated text |
-| Retrieval failed | memory writes skipped (dedupe cannot be guaranteed), reason shown |
-| Write failed | `MemoryWriteReport.failures` shown; no "remembered" claim |
-
-## Live verification (required when a key is available)
-
-```bash
-uv run python scripts/check_services.py                 # configured/connected/tools
-uv run python scripts/check_services.py --tools         # real schemas
-uv run python scripts/check_services.py --live-memory-test --customer customer_001
-uv run pytest -m live
+```mermaid
+flowchart TD
+    C[changes_memory] --> S[search_memories scoped to customer]
+    S -->|failure| F[failed action, nothing changed]
+    S --> P[correction_plan]
+    P --> T{targets found?}
+    T -->|no| NF[not_found action]
+    T -->|delete| D[delete_memory per validated id]
+    T -->|replace| U[update_memory with brand rewrite]
+    D --> R[verified actions]
+    U --> R
 ```
 
-The probe:
-1. adds a clearly labelled memory for the customer,
-2. searches for it as the same customer,
-3. searches as a different customer and requires no match,
-4. deletes the probe memory.
+- Only ids from the scoped search become targets.
+- A negated brand is the *old* preference; a positive brand is the new one.
+- `"I prefer JBL, not Sony."` → update Sony records to JBL.
+- `"I no longer prefer Sony."` / `"Forget that I prefer Sony."` → delete matching
+  Sony records.
+- No identifiable target → `not_found`; nothing is deleted.
+- `delete_all_memories` is **never** used for a single preference correction.
+- `MemoryService.update_memory`/`delete_memory` re-verify ownership through a
+  scoped `get_memories` before calling the tool.
 
-Mem0 extraction can be asynchronous, so the probe waits briefly before searching.
-In this development environment no key was available; therefore live Mem0
-behaviour is **BLOCKED**, not verified.
+## 6. Isolation
+
+- Every read uses `filters={"AND":[{"user_id": customer_id}]}`.
+- Returned records whose `user_id` differs are dropped defensively.
+- `customer_id` → Mem0 `user_id` is the only mapping.
+- Jev never receives the customer id or memory text.
+
+## 7. Verification status
+
+Verified live against Mem0 Cloud:
+
+- tool discovery and schemas;
+- `add_memory` → `event_id`/`PENDING`;
+- `get_event_status` → `SUCCEEDED` with created id and text;
+- search returning stable ids and `user_id`;
+- delete of the disposable test record.
+
+The unit suite exercises the real service code with a fake MCP transport for
+policy, pending/failed events, corrections and isolation. The live test
+`tests/test_memory.py::test_live_mem0_add_search_isolation_and_delete` is
+skipped unless `MEM0_API_KEY` is exported.
+
+## 8. Restart behaviour
+
+Mem0 persists independently of the process. Restarting Streamlit clears
+LangGraph checkpoints but not memories; the UI's memory panel re-reads them on
+demand.

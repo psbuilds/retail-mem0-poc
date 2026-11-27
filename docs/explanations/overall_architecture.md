@@ -1,15 +1,13 @@
 # Overall architecture
 
-## Purpose
+## 1. Purpose
 
-The POC demonstrates one capability well: a shopping assistant that remembers
-stable customer preferences in Mem0 Cloud and applies them to later conversations,
-while still obeying the customer's current explicit request.
+A small retail shopping assistant that remembers stable customer preferences in
+Mem0 Cloud and applies them later, while obeying the current explicit request.
+A Jev-based query router ensures each message executes only the operations it
+needs instead of running every node on every turn.
 
-It is intentionally small: one LangGraph workflow, one product API, one UI, one
-memory provider. There is no multi-agent system and no chatbot FastAPI backend.
-
-## Component diagram
+## 2. Component diagram
 
 ```mermaid
 flowchart TB
@@ -23,6 +21,9 @@ flowchart TB
         N[nodes.py]
         S[state.py]
         P[prompts.py]
+        QR[QueryRouter<br/>routing/classifier.py]
+        JC[JevClient<br/>routing/jev_client.py]
+        RR[Rules / guards<br/>routing/rules.py]
         MM[memory_manager.py]
         MS[memory_service.py]
         MC[memory_client.py]
@@ -33,7 +34,8 @@ flowchart TB
         CFG[config/settings.py]
     end
 
-    subgraph Remote_or_local_services
+    subgraph External
+        JEV[(TypeSafe Jev)]
         MCP[(Mem0 Cloud MCP)]
         OLL[(Ollama + Llama 3.1)]
         API[FastAPI catalogue]
@@ -43,109 +45,112 @@ flowchart TB
     UI --> CS
     CS --> G
     G --> N
-    N --> S
-    N --> P
+    N --> QR
+    QR --> JC
+    QR --> RR
+    JC --> JEV
     N --> MS
-    N --> PS
-    N --> REC
-    N --> OL
     MS --> MC
-    MM --> MS
     MC --> MCP
+    MM --> MS
+    N --> PS
     PS --> PC
     PC --> API
     API --> JSON
+    N --> REC
+    N --> OL
     OL --> OLL
     CS --> MM
 ```
 
-## Boundaries and why they exist
+## 3. Boundaries
 
 | Boundary | Rule | Reason |
 |---|---|---|
-| UI ↔ application | UI calls `chatbot_service` only | A future FastAPI `POST /chat` can reuse the same function. |
-| Chatbot ↔ Streamlit | No Streamlit import outside `app/ui` | Keeps core logic testable and portable. |
-| Chatbot ↔ memory | Only `memory_service` talks to `memory_client` | MCP details stay in one place; scoping is enforced centrally. |
-| Chatbot ↔ product data | Application never reads `products.json` | The FastAPI service is the single catalogue source. |
-| LLM ↔ product selection | LLM explains; Python selects | Prevents invented products/prices. |
-| Long-term memory ↔ chat history | Mem0 vs LangGraph checkpoint | Clearing chat must not delete preferences. |
+| UI ↔ application | UI calls `chatbot_service` only | A future FastAPI `POST /chat` can reuse it |
+| Chatbot ↔ Streamlit | no Streamlit import outside `app/ui` | testable core |
+| Router ↔ execution | Jev returns flags, Python returns node names | model can never execute an arbitrary node |
+| Chatbot ↔ memory | only `memory_service` speaks MCP | scoping and schema adaptation centralised |
+| Chatbot ↔ catalogue | never reads `products.json` | FastAPI remains the source of truth |
+| LLM ↔ selection | LLM extracts/explains; Python selects | no invented products |
+| Memory ↔ chat | Mem0 vs LangGraph checkpoint | clearing chat keeps preferences |
 
-## Responsibilities
+## 4. Components
 
-### Frontend — `app/ui/streamlit_app.py`
-Renders chat history, handles customer selection, shows product cards, service
-status and memory management controls. It calls `process_message`,
-`list_customer_memories`, `delete_customer_memory`, `clear_customer_memories` and
-`check_services` from the service layer. It contains no prompt, filtering, MCP or
-graph logic.
+### Frontend
+Chat history, customer selection, product cards, service status, route
+diagnostics and memory management controls. No business logic.
 
-### Service layer — `app/services/chatbot_service.py`
-Validates `customer_id` / `session_id` / message, invokes the compiled graph with
-`thread_id=session_id`, maps the graph state to a validated `ChatResponse`, and
-exposes status/memory helpers. No Streamlit import (covered by a test).
+### Service layer
+Validates identifiers, invokes the graph with `thread_id=session_id`, returns a
+`ChatResponse` including route, guards, execution path, memory actions/events
+and errors. Exposes status and memory-management helpers.
 
-### Agent — `app/agent/`
-- `state.py`: `AgentState` TypedDict; all fields documented.
-- `prompts.py`: three system prompts and three user-prompt builders.
-- `nodes.py`: seven nodes plus Pydantic validation, deterministic grounding,
-  precedence resolution and heuristic fallbacks.
-- `graph.py`: sequential `StateGraph`, `InMemorySaver` checkpointer, production
-  dependency wiring.
+### Routing (`app/routing/`)
+- `models.py` — validated `RouteDecision`.
+- `questions.py` — five Noul questions plus intent/follow-up Choice.
+- `jev_client.py` — HTTP transport, error categories.
+- `rules.py` — shortcuts, guards, brand polarity, fallback classifier.
+- `classifier.py` — orchestration, reconciliation, step planning.
 
-### Memory — `app/memory/`
-- `memory_client.py`: one authenticated Streamable HTTP MCP session owned by a
-  background asyncio task; tool discovery; schema-adaptive arguments; safe result
-  parsing; explicit auth/timeout/tool errors.
-- `memory_service.py`: customer-scoped `add`, `search`, `list`, `update`,
-  `delete`, `delete_all`, ownership verification, isolation filtering.
-- `memory_manager.py`: persistent vs temporary classification, duplicate
-  detection, write reporting.
+### Agent (`app/agent/`)
+Nine nodes: `prepare_turn`, `route_query`, `manage_memory`,
+`retrieve_memory`, `understand_request`, `search_products`,
+`recommend_products`, `generate_response`, `finalize_turn`. Shared conditional
+edges consume the ordered plan.
 
-### Products — `app/products/`
-- `product_client.py`: HTTP calls to the FastAPI API with typed errors.
-- `product_service.py`: candidate retrieval (category + budget superset), cached
-  brand list, health helper.
+### Memory (`app/memory/`)
+- `memory_client.py` — one authenticated MCP session on a background loop.
+- `memory_service.py` — scoped add/search/list/update/delete, ownership checks,
+  async event polling.
+- `memory_manager.py` — durable-vs-temporary policy, correction planning,
+  truthful outcome reporting.
 
-### Recommendations — `app/recommendations/recommendation_service.py`
-Pure functions: hard filtering, deterministic ranking, optional limit.
+### Products and recommendations
+`product_service` fetches category/budget candidates; `recommendation_service`
+owns filtering and ranking. Both are unchanged apart from accepting brand
+exclusions from the router/grounding layer.
 
-### LLM — `app/llm/ollama_client.py`
-Ollama `/api/chat` calls, model availability, safe JSON extraction from model
-output, explicit exceptions.
+### LLM
+Ollama handles requirement extraction, product explanations, comparisons and
+normal conversation. Memory answers and confirmations are deterministic.
 
-### Backend — `backend/`
-FastAPI app with `/health`, `/products`, `/products/search`,
-`/products/{product_id}`. Catalogue filtering lives in
-`backend/routes/products.py`; sample data lives in `backend/data/products.json`.
+## 5. Technology decisions
 
-## Technology decisions
+- **Jev** because zero-shot classification of routing intent is the one place a
+  model earns its cost; a 64k context and calibrated probabilities beat a
+  512-token specialised encoder for this POC.
+- **Deterministic guards** because corrections and greetings are high-impact and
+  must not depend on a probability.
+- **Mem0 MCP only** to prove hosted-memory interoperability; no SDK/REST fallback.
+- **Ollama** so the POC runs without paid LLM keys for generation.
+- **FastAPI + JSON** for an independent, synthetic catalogue.
+- **No database** — Mem0 satisfies persistence.
 
-- **Streamlit first** because it makes the POC demonstrable without a custom
-  frontend; the service layer keeps it replaceable.
-- **LangGraph** because state, node order and checkpointed conversation context
-  are explicit and testable.
-- **Mem0 Cloud via MCP only** to prove interoperability with the hosted memory
-  service and to avoid running memory infrastructure locally.
-- **Ollama** because the POC should run locally without paid LLM API keys.
-- **FastAPI + JSON** to keep the catalogue independent and obviously synthetic.
-- **No database** because the POC's persistence requirement is satisfied by Mem0.
+## 6. Failure philosophy
 
-## Failure philosophy
+- Jev down → rules routing, `source="fallback"`, turn still completes.
+- Mem0 down → answer without personalisation; never fabricate memory.
+- Mem0 write pending → reported as pending, never saved.
+- Catalogue down → explicit message, no products invented.
+- Ollama down → deterministic extraction and honest partial reply.
+- Invalid model JSON → validation failure → deterministic fallback.
 
-Every external dependency is optional at runtime except the ones needed for the
-current action:
-- Mem0 down → answer without personalisation, report memory unavailable, do not
-  save or claim success.
-- Product API down → no recommendations, explicit message.
-- Ollama down → deterministic requirement fallback and a response that says the
-  LLM explanation is unavailable.
-- Invalid LLM JSON → validation error → deterministic fallback.
+## 7. Verification status
 
-The application never silently substitutes fake live results.
+- 173 unit/integration tests pass; 2 live tests are skipped without credentials.
+- Live Mem0 verified manually: tool schemas, `add_memory` event id, event status,
+  search ids/user scope, deletion.
+- Live Jev could not be exercised in this environment because
+  `TYPESAFE_API_KEY` is not set; the HTTP contract was verified against the
+  published API reference and is covered by a skipped live test.
+- Ollama and the product API are exercised through fakes in tests; the running
+  services were not required for the suite.
 
-## Known verification limits
+## 8. Known limits
 
-The repository was developed in an environment without `MEM0_API_KEY`, so live
-Mem0 operations could not be executed. Unit tests exercise the real MCP client
-code with a fake session, and a live test plus diagnostics script are provided.
-Ollama and the product API were exercised for real.
+- Brand hints in the router duplicate the catalogue brand list for guard
+  purposes; the catalogue remains authoritative for products.
+- Feature-only memory corrections report "not found" rather than guessing.
+- In-memory checkpoints are per process; conversation context is lost on restart
+  while Mem0 preferences persist.

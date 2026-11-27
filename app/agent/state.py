@@ -6,6 +6,10 @@ The state is a plain ``TypedDict``.  LangGraph checkpoints it per
 
 Conversation state is intentionally separate from long-term memory:
 clearing a chat starts a new session id, while Mem0 preferences remain.
+
+Routing fields make the turn's plan explicit.  ``pending_steps`` is consumed by
+each node as it runs and ``visited_steps`` is the audit trail; both are reset
+by ``prepare_turn``.
 """
 
 from __future__ import annotations
@@ -36,7 +40,14 @@ class AgentState(TypedDict, total=False):
     # Conversation context (checkpointed per session)
     conversation_history: list[ChatMessage]
 
-    # Memory node
+    # Routing node
+    route: dict[str, Any]  # serialised RouteDecision
+    pending_steps: list[str]  # ordered node allowlist for this turn
+    visited_steps: list[str]  # nodes actually executed
+    router_usage: dict[str, Any]  # model, input tokens, latency
+    route_guards: list[str]  # deterministic guards applied after Jev
+
+    # Memory retrieval node
     customer_memories: list[str]
     memory_status: str  # success | empty | error | unavailable | not_configured
     memory_error: str | None
@@ -52,6 +63,7 @@ class AgentState(TypedDict, total=False):
 
     # Product node
     products: list[dict[str, Any]]
+    previous_recommendations: list[dict[str, Any]]  # last turn's shortlist
     product_status: str  # success | empty | error
 
     # Recommendation node
@@ -59,10 +71,14 @@ class AgentState(TypedDict, total=False):
 
     # Response node
     response: str
+    response_kind: str  # conversational | product | comparison | explanation |
+    #                     memory | confirmation | error
 
-    # Memory update node
-    memory_candidates: list[dict[str, Any]]
-    memory_writes: dict[str, Any]
+    # Memory management node
+    memory_candidates: list[dict[str, Any]]  # retrieved records considered
+    memory_actions: list[dict[str, Any]]  # verified add/update/delete outcomes
+    memory_events: list[dict[str, Any]]  # event ids and their final status
+    memory_writes: dict[str, Any]  # aggregate report (kept for the public API)
 
     # Diagnostics
     errors: list[str]

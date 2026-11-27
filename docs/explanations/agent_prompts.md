@@ -31,11 +31,18 @@ Key rules:
 - never invent values;
 - non-shopping messages get `is_shopping_request: false`.
 
-### `PREFERENCE_EXTRACTION_SYSTEM_PROMPT`
-Asks for `{"preferences": [{text, kind, confidence, reason}]}` and explains the
-persistent/temporary distinction (stable brands/features/usual budget vs this
-purchase/gift/trip/one-off brand). Limits to at most three explicit preferences and
-forbids inference from ambiguous requests.
+### `CONVERSATION_SYSTEM_PROMPT`
+Persona and rules for greetings/general questions: do not claim a catalogue
+search, do not invent products or prices, invite a shopping request, stay under
+90 words, and never claim a preference was saved.
+
+### `COMPARISON_SYSTEM_PROMPT`
+Rules for comparing/explaining **previously recommended** products only: use the
+provided attributes, name concrete trade-offs, mention ₹ prices, stay under 160
+words, never invent products, never claim a saved preference.
+
+Preference extraction no longer has a prompt: Mem0 performs extraction from the
+customer's sentence with `infer=true`.
 
 ### `RESPONSE_SYSTEM_PROMPT`
 Sets the assistant persona and hard rules: recommend only provided products, never
@@ -56,9 +63,12 @@ Returns a single string. It includes context so the model can set
 `refines_previous_request` correctly, while the system prompt forbids copying
 values from context.
 
-### `preference_user_prompt(message, conversation_history) -> str`
-Includes the last 4 turns and the latest message, asking for the JSON preferences
-object. Context helps classify "I prefer Sony" vs "wants JBL this time".
+### `conversation_user_prompt(message, conversation_history) -> str`
+Includes the last 6 turns and the current message for a conversational reply.
+
+### `comparison_user_prompt(message, recommendations, requirements=None, followup_action="compare") -> str`
+Serialises the numbered earlier products (name, brand, price, rating, wireless,
+ANC, features), the requested action and the earlier requirements.
 
 ### `response_user_prompt(message, requirements, memories, recommendations, memory_status, relaxed_preferences=None) -> str`
 Serialises the selected products (name, brand, price, rating, wireless, ANC,

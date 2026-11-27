@@ -40,6 +40,22 @@ success flag, records and error text.
 | `error` | Human-readable failure |
 | `tool` | Tool used |
 | `raw` | Parsed MCP payload |
+| `event_id` | Mem0 asynchronous event id for adds |
+| `event_status` | Status returned by `add_memory` (`PENDING`) |
+
+`ok=True` on an add means *the tool accepted the write*, not that the memory
+exists yet. Completion is decided by `wait_for_event`.
+
+### `MemoryEventResult`
+
+| Attribute | Meaning |
+|---|---|
+| `ok` | Status is `SUCCEEDED`/`COMPLETED` |
+| `event_id` | Polled event |
+| `status` | `PENDING`, `SUCCEEDED`, `FAILED`, ... |
+| `memory_ids` | Ids created/affected by the event |
+| `texts` | Stored memory texts from `results[].data.memory` |
+| `error` | Mem0 error or polling-timeout message |
 
 ### `MemoryServiceStatus`
 
@@ -89,8 +105,27 @@ This is defence in depth against a server returning mixed results.
 - Validates customer id and non-empty text.
 - Offers both `text` and `messages` candidates; the tool schema decides.
 - Sends `user_id`.
-- Parses created records.
+- Returns the `event_id` and `PENDING` status from the verified payload
+  (`{"event_id": "...", "status": "PENDING"}`).
 - Any MCP error → `ok=False` with the error.
+- Never claims the memory was created.
+
+### `get_event_status(event_id) -> MemoryEventResult`
+Calls the verified tool `get_event_status` and parses `status`, `results[].id`,
+`results[].data.memory` and `error`.
+
+### `wait_for_event(event_id, timeout=None, interval=None) -> MemoryEventResult`
+Polls until a terminal status or the deadline:
+
+- `SUCCEEDED`/`COMPLETED`/`DONE` → `ok=True`;
+- `FAILED`/`ERROR`/`CANCELLED` → `ok=False` with the event error;
+- deadline reached → `ok=False`, status preserved (`PENDING`) and a timeout
+  message; a timeout is never success;
+- the status tool is missing/unusable (`UNKNOWN` with an error) → returned
+  immediately rather than polling an unavailable tool for the full timeout.
+
+Defaults come from `MEMORY_EVENT_TIMEOUT_SECONDS` (15) and
+`MEMORY_EVENT_POLL_INTERVAL_SECONDS` (1).
 
 ### `search_memories(customer_id, query, limit=None) -> MemoryResult`
 - Sends `query`, `filters` (user scope), `user_id`, `limit` and `top_k` candidates
@@ -106,8 +141,10 @@ Lists up to 100 memories for the customer and requires the id to be present.
 Raises `Mem0MCPError` if listing fails, because ownership cannot be confirmed.
 
 ### `update_memory(customer_id, memory_id, text) -> MemoryResult`
-Verifies ownership, then calls `update_memory` with id/text candidates. Reports a
-missing tool or schema failure honestly.
+Verifies ownership, then calls the verified `update_memory` tool. Its real schema
+accepts only `memory_id` (required) plus optional `text`/`metadata`; ownership is
+checked through a scoped `get_memories` first because the tool has no customer
+scope.
 
 ### `delete_memory(customer_id, memory_id) -> MemoryResult`
 Verifies ownership, then calls `delete_memory`. Refuses foreign ids. This is the
@@ -131,6 +168,12 @@ search_memories(customer, query)
   -> client.call_tool("search_memories", args)
   -> _records_from_result(...)            # parse + drop foreign users
   -> MemoryResult(ok=True, records=...)
+
+add_memory(customer, text)
+  -> call_tool("add_memory")              # returns event_id + PENDING
+  -> wait_for_event(event_id)
+       -> call_tool("get_event_status")   # repeated until terminal/timeout
+  -> MemoryEventResult(ok=status == SUCCEEDED, texts=[...])
 ```
 
 ## 6. Input and output
@@ -140,12 +183,17 @@ Input:
 service.add_memory("customer_001", "Usually prefers Sony headphones.")
 ```
 
-Success:
+Accepted (asynchronous):
 ```python
-MemoryResult(ok=True, operation="add",
-             records=[MemoryRecord(memory_id="...", text="Usually prefers Sony headphones.",
-                                   user_id="customer_001")],
-             tool="add_memory")
+MemoryResult(ok=True, operation="add", tool="add_memory",
+             event_id="7951bbd9-...", event_status="PENDING")
+```
+
+Completed:
+```python
+MemoryEventResult(ok=True, event_id="7951bbd9-...", status="SUCCEEDED",
+                  memory_ids=["f60542f7-..."],
+                  texts=["User usually prefers Sony wireless headphones with noise cancellation"])
 ```
 
 Failure:
@@ -156,8 +204,8 @@ MemoryResult(ok=False, operation="add",
 
 ## 7. Interaction with other modules
 
-- `agent/nodes.py` uses search/add.
-- `memory_manager.py` uses add for accepted preferences.
+- `agent/nodes.py` uses search, add, update/delete for corrections and event polling.
+- `memory_manager.py` uses add for accepted preferences and update/delete for corrections.
 - `chatbot_service.py` exposes list/delete/clear to the UI.
 - It is the only module that calls `Mem0MCPClient`.
 
@@ -167,8 +215,10 @@ MemoryResult(ok=False, operation="add",
   operation is refused.
 - **Ownership before mutation**: update/delete verify the memory belongs to the
   customer, preventing accidental cross-customer edits.
-- **No fabricated success**: `ok=True` only after a successful MCP call; parser
-  fallbacks return empty lists rather than invented memories.
+- **No fabricated success**: transport acceptance is not completion; adds are
+  only "saved" after `get_event_status` reports `SUCCEEDED`.
+- **Timeout is pending**: an unfinished event is reported with its real status.
+- Parser fallbacks return empty lists rather than invented memories.
 - **Tolerant naming**: different documented result/tool key variants are supported
   without changing the app.
 - Errors are returned, not raised, for normal service failures; only programmer

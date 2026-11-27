@@ -26,13 +26,16 @@ No classes are defined.
 ### `_print_response(result: ChatResponse) -> None`
 
 Prints the assistant reply, recommendations (name, price, rating, product ID),
-status line, saved memories and errors.
+the route (`intent`, `source`, `response_kind`, Jev input tokens), the service
+status line, saved memories, **pending** memories and errors.
 
 - Parameters: `result` — a `ChatResponse`.
 - Returns: nothing.
 - Internal operations: iterates `result.recommendations`, formats prices with
-  thousands separators, reads `memory_saved`, `errors`, `memory_status`,
-  `llm_status`, `product_status`.
+  thousands separators, reads `route`, `response_kind`, `memory_saved`,
+  `memory_pending`, `errors`, `memory_status`, `llm_status`, `product_status`.
+  Pending writes are printed separately so an unconfirmed write is never shown as
+  saved.
 - Errors: none raised; it only prints.
 
 ### `main() -> int`
@@ -75,8 +78,9 @@ Assistant: Here are some Sony headphones that fit your request.
 Recommendations (from the deterministic engine):
   - Sony WH-CH520 Wireless On-Ear Headphones | ₹4,490 | rating 4.3 | HP003
 
+[route=product_search | source=rules | kind=product | tokens=-]
 [memory=success | llm=success | products=success]
-[saved to Mem0: ["Usually prefers Sony headphones."]]
+[pending in Mem0 (not confirmed): ["I usually prefer Sony headphones"]]
 ```
 
 ## 7. Interaction with other modules

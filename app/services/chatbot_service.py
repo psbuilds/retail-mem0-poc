@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.agent.graph import get_graph
+from app.config.settings import get_settings
 from app.llm.ollama_client import ollama_status
 from app.memory.memory_service import (
     MemoryResult,
@@ -34,11 +35,20 @@ class ChatResponse(BaseModel):
     recommendations: list[dict[str, Any]] = Field(default_factory=list)
     memory_status: str = "unknown"
     memory_saved: list[str] = Field(default_factory=list)
+    memory_pending: list[str] = Field(default_factory=list)
     memory_writes: dict[str, Any] = Field(default_factory=dict)
+    memory_actions: list[dict[str, Any]] = Field(default_factory=list)
+    memory_events: list[dict[str, Any]] = Field(default_factory=list)
     requirements: dict[str, Any] = Field(default_factory=dict)
     relaxed_preferences: list[str] = Field(default_factory=list)
     product_status: str = "unknown"
     llm_status: str = "unknown"
+    # Routing diagnostics
+    route: dict[str, Any] = Field(default_factory=dict)
+    route_guards: list[str] = Field(default_factory=list)
+    router_usage: dict[str, Any] = Field(default_factory=dict)
+    response_kind: str = ""
+    execution_path: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
 
 
@@ -132,11 +142,19 @@ def process_message(
         recommendations=state.get("recommendations") or [],
         memory_status=state.get("memory_status", "unknown"),
         memory_saved=memory_writes.get("saved", []) or [],
+        memory_pending=memory_writes.get("pending", []) or [],
         memory_writes=memory_writes,
+        memory_actions=state.get("memory_actions") or [],
+        memory_events=state.get("memory_events") or [],
         requirements=state.get("resolved_requirements") or {},
         relaxed_preferences=state.get("relaxed_preferences") or [],
         product_status=state.get("product_status", "unknown"),
         llm_status=state.get("llm_status", "unknown"),
+        route=state.get("route") or {},
+        route_guards=state.get("route_guards") or [],
+        router_usage=state.get("router_usage") or {},
+        response_kind=state.get("response_kind", ""),
+        execution_path=state.get("visited_steps") or [],
         errors=state.get("errors") or [],
     )
 
@@ -149,6 +167,8 @@ def check_services() -> dict[str, Any]:
     memory: MemoryServiceStatus = get_memory_service().status()
     ollama_ok, ollama_message = ollama_status()
     product_ok, product_message = product_api_status()
+    settings = get_settings()
+    router_enabled = bool(settings.jev_configured and settings.router_use_jev)
     return {
         "memory": {
             "ok": memory.connected,
@@ -158,6 +178,17 @@ def check_services() -> dict[str, Any]:
         },
         "ollama": {"ok": ollama_ok, "message": ollama_message},
         "product_api": {"ok": product_ok, "message": product_message},
+        "router": {
+            "ok": router_enabled,
+            "configured": settings.jev_configured,
+            "model": settings.jev_model,
+            "message": (
+                f"Jev router ready ({settings.jev_model})"
+                if router_enabled
+                else "Deterministic rules mode (TYPESAFE_API_KEY not set "
+                "or Jev disabled)"
+            ),
+        },
     }
 
 

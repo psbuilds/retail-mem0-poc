@@ -25,6 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.config.settings import get_settings  # noqa: E402
 from app.llm.ollama_client import ollama_status  # noqa: E402
 from app.memory.memory_client import Mem0MCPClient, Mem0MCPError  # noqa: E402
 from app.memory.memory_service import get_memory_service  # noqa: E402
@@ -61,6 +62,16 @@ def check_status() -> int:
     if not ok:
         failures += 1
 
+    _print_header("Query router")
+    settings = get_settings()
+    if settings.jev_configured and settings.router_use_jev:
+        print(f"Jev configured ({settings.jev_model}); routing uses Jev + guards")
+    else:
+        print(
+            "Deterministic rules mode: TYPESAFE_API_KEY is not set or "
+            "ROUTER_USE_JEV=false"
+        )
+
     return 1 if failures else 0
 
 
@@ -90,7 +101,18 @@ def live_memory_test(customer_id: str) -> int:
     if not added.ok:
         print(f"FAIL add_memory: {added.error}")
         return 1
-    print("OK add_memory")
+    if not added.event_id:
+        print("FAIL: add_memory returned no event id, so completion cannot be verified")
+        return 1
+
+    # Mem0 writes are asynchronous: wait for the real event instead of assuming
+    # the memory exists as soon as the tool accepts it.
+    print(f"Waiting for Mem0 event {added.event_id} ...")
+    event = service.wait_for_event(added.event_id)
+    if not event.ok:
+        print(f"FAIL memory event: status={event.status} error={event.error}")
+        return 1
+    print(f"OK add_memory event {event.status}")
 
     print("Searching for the probe as the same customer ...")
     found = service.search_memories(customer_id, "test-brand headphones", limit=20)

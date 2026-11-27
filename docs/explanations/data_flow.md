@@ -1,135 +1,89 @@
 # Data flow
 
-## End-to-end data movement
+## 1. Turn-level flow
 
 ```mermaid
 flowchart LR
-    A[User message<br/>string] --> B[Streamlit chat state]
-    B -->|customer_id, session_id, message| C[ChatResponse pipeline]
-
-    C --> D[LangGraph state]
-    D -->|query + customer_id| E[MemoryService]
-    E -->|tools/call add/search/get/delete| F[(Mem0 Cloud)]
-
-    D -->|message + history + memories| G[OllamaClient]
-    G -->|JSON requirements| D
-    G -->|natural-language reply| D
-
-    D -->|category, budget| H[ProductService]
-    H -->|GET /products| I[FastAPI]
-    I --> J[(products.json)]
-    J --> I
-    I -->|JSON products| H
-    H -->|candidate dicts| D
-
-    D -->|products + requirements| K[Recommendation engine]
-    K -->|ranked dicts| D
-
-    D -->|accepted preference texts| E
-    D -->|ChatResponse| B
+    U[User text] --> CS[chatbot_service]
+    CS --> ST[AgentState]
+    ST --> RQ[route_query]
+    RQ -->|"message + 2 turns"| JEV[Jev]
+    JEV -->|"RouteDecision"| RQ
+    RQ -->|"pending_steps"| NODES[planned nodes]
+    NODES -->|"preference text"| MM[MemoryManager]
+    MM -->|"scoped calls"| MCP[Mem0 MCP]
+    NODES -->|"search query"| MS[MemoryService]
+    MS --> MCP
+    NODES -->|"category + budget"| PS[ProductService]
+    PS --> API[FastAPI catalogue]
+    API --> JSON[(products.json)]
+    NODES -->|"extraction / explanation"| OL[Ollama]
+    NODES --> RESP[response + metadata]
+    RESP --> CS
+    CS --> UI[Streamlit]
 ```
 
-## Data shapes
+## 2. What crosses each boundary
 
-### Message into the system
-```python
-{"customer_id": "customer_001", "session_id": "customer_001-a1b2c3d4", "message": "Suggest headphones"}
-```
+| Boundary | Data sent | Data returned |
+|---|---|---|
+| UI → `chatbot_service` | customer id, session id, message | `ChatResponse` |
+| `chatbot_service` → graph | identity + message | full state |
+| graph → Jev | message + up to 2 prior turns | probabilities, intent, tokens |
+| graph → Mem0 | customer-scoped queries, preference text, validated ids | records, event ids, statuses |
+| graph → Product API | category, max budget | product dicts |
+| graph → Ollama | prompts + grounded context | JSON requirements or text |
+| graph → UI | response, recommendations, diagnostics | — |
 
-### Memory record (application shape)
+## 3. Product data
+
+`products.json` is read only by FastAPI. The application receives product
+dictionaries, filters and ranks them in Python, and passes the selected list to
+Ollama for explanation. `recommendation_service` is the only ranking authority.
+
+## 4. Memory data
+
+| Direction | Shape |
+|---|---|
+| `add_memory` request | `text`/`messages`, `user_id`, `metadata`, `infer` |
+| `add_memory` response | `{event_id, status: "PENDING"}` |
+| `get_event_status` | `status`, `results[].id`, `results[].data.memory` |
+| `search_memories` | `{results: [{id, memory, user_id, score, metadata}]}` |
+| `update_memory` / `delete_memory` | `memory_id` only; ownership checked first |
+
+`MemoryRecord` normalises records; `MemoryAction` normalises outcomes.
+
+## 5. Router data
+
 ```python
-MemoryRecord(
-    memory_id="f4cbdb08-...",       # from Mem0 id/memory_id
-    text="Usually prefers Sony headphones with noise cancellation.",
-    metadata={"source": "retail-memory-assistant"},
-    score=0.82,
-    created_at="2026-11-19T...",
-    user_id="customer_001",
+RouteDecision(
+    intent="product_search",
+    wants_products=True,
+    needs_personalisation=False,
+    followup_action="none",
+    probabilities={"wants_products": 0.97, ...},
+    source="jev",
+    confident=True,
+    model="jev-latest",
+    input_tokens=428,
+    latency_ms=210,
+    guards=[],
 )
 ```
 
-### Requirements after resolution
-```python
-{
-  "category": "headphones",
-  "brand": "Sony",
-  "max_budget": 5000.0,
-  "wireless": True,
-  "noise_cancellation": True,
-  "required_features": [],
-  "excluded_features": [],
-  "excluded_brands": [],
-  "excluded_product_ids": [],
-}
-```
+`router_usage` and `route_guards` are copied into state and surfaced in
+`ChatResponse`.
 
-### Recommendation (catalogue shape, unchanged)
-All catalogue fields are preserved so the UI and LLM see the same source of truth:
-`product_id`, `name`, `brand`, `category`, `price`, `rating`, `wireless`,
-`noise_cancellation`, `features`.
+## 6. Conversation data
 
-### Chat response
-```python
-ChatResponse(
-    ok=True,
-    customer_id="customer_001",
-    session_id="customer_001-a1b2c3d4",
-    response="Based on your preferences, here are ...",
-    recommendations=[...],
-    memory_status="success",
-    memory_saved=["Usually prefers Sony headphones ..."],
-    memory_writes={"status": "success", "saved": [...], "skipped": [...], ...},
-    requirements={...},
-    relaxed_preferences=[],
-    product_status="success",
-    llm_status="success",
-    errors=[],
-)
-```
+LangGraph checkpoints `conversation_history` (last 12 messages),
+`resolved_requirements` and `previous_recommendations` per `thread_id`.
+`prepare_turn` moves the last shortlist into `previous_recommendations` so
+compare/explain follow-ups need no new catalogue query.
 
-## Per-component inputs and outputs
+## 7. Privacy boundaries
 
-| Component | Input | Output |
-|---|---|---|
-| Streamlit | user text, selected customer | rendered messages, cards, statuses |
-| `process_message` | customer/session/message | `ChatResponse` |
-| `prepare_turn` | state | updated history, reset fields |
-| `retrieve_memory` | customer, message | memory texts, status |
-| `understand_request` | message, history, memories, brands | grounded requirements + resolution |
-| `search_products` | category, budget | candidate product list |
-| `recommend_products` | products, requirements | ranked recommendations |
-| `generate_response` | requirements, memories, products | response text |
-| `update_memory` | message, history, existing memories | write report |
-| `MemoryService` | customer-scoped calls | `MemoryResult` |
-| `Mem0MCPClient` | tool name + arguments | normalised payload |
-| `ProductService` | filters | product dicts |
-| `ProductAPIClient` | HTTP filters | JSON products |
-| `OllamaClient` | chat messages | text / parsed JSON |
-| FastAPI | query params | filtered catalogue JSON |
-
-## Persistence boundaries
-
-| Data | Stored where | Survives restart? |
-|---|---|---|
-| Long-term preferences | Mem0 Cloud | Yes |
-| Current chat messages | Streamlit session state | No |
-| Conversation context for follow-ups | LangGraph `InMemorySaver` | No |
-| Product catalogue | `backend/data/products.json` | Yes |
-| Configuration | environment / `.env` | Yes |
-
-Clearing a conversation changes the UI's session id and messages; it does not call
-a memory deletion tool. Deleting memories is a separate, explicit sidebar action.
-
-## Isolation flow
-
-```mermaid
-flowchart TD
-    A[Selected customer_002] --> B[chat history key customer_002]
-    A --> C[memory calls user_id=customer_002]
-    C --> D{Returned record user_id?}
-    D -->|customer_002 or absent| E[Show]
-    D -->|different| F[Discard defensively]
-```
-
-The UI keeps separate message lists per customer, so even in-process state cannot
-mix conversations.
+- Jev: message + two turns only.
+- Mem0: customer-scoped preference text and ids.
+- Ollama: local prompts; may include retrieved memories, never API keys.
+- No secret is logged; `.env` stays out of source control.

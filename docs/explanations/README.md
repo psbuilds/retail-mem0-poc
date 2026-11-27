@@ -9,9 +9,10 @@ its explanation.
 | Document | What it explains |
 |---|---|
 | [overall_architecture.md](overall_architecture.md) | Components, boundaries, technology choices |
-| [application_workflow.md](application_workflow.md) | One chat turn from Streamlit to response and memory update |
+| [application_workflow.md](application_workflow.md) | One chat turn from Streamlit to routed response and memory outcome |
+| [routing_workflow.md](routing_workflow.md) | Jev routing, guards, fallback, step planning and all required scenario paths |
 | [memory_workflow.md](memory_workflow.md) | Mem0 MCP connection, scoping, retrieval, persistence, isolation |
-| [langgraph_workflow.md](langgraph_workflow.md) | State fields, nodes, order, checkpointing, follow-ups |
+| [langgraph_workflow.md](langgraph_workflow.md) | Routed step queue, nodes, checkpointing, follow-ups |
 | [recommendation_workflow.md](recommendation_workflow.md) | Filtering, precedence, soft-memory relaxation, ranking |
 | [data_flow.md](data_flow.md) | How data moves between every component |
 | [configuration_and_project_files.md](configuration_and_project_files.md) | `.env`, requirements, run script, pytest config, JSON catalogue, root docs |
@@ -28,6 +29,12 @@ its explanation.
 | `app/agent/prompts.py` | [agent_prompts.md](agent_prompts.md) |
 | `app/agent/nodes.py` | [agent_nodes.md](agent_nodes.md) |
 | `app/agent/graph.py` | [agent_graph.md](agent_graph.md) |
+| `app/routing/__init__.py` | [query_router.md](query_router.md) |
+| `app/routing/models.py` | [routing_models.md](routing_models.md) |
+| `app/routing/questions.py` | [routing_questions.md](routing_questions.md) |
+| `app/routing/jev_client.py` | [jev_client.md](jev_client.md) |
+| `app/routing/rules.py` | [routing_rules.md](routing_rules.md) |
+| `app/routing/classifier.py` | [routing_classifier.md](routing_classifier.md) |
 | `app/memory/memory_client.py` | [memory_client.md](memory_client.md) |
 | `app/memory/memory_service.py` | [memory_service.md](memory_service.md) |
 | `app/memory/memory_manager.py` | [memory_manager.md](memory_manager.md) |
@@ -48,6 +55,8 @@ its explanation.
 | `tests/test_recommendations.py` | [test_recommendations.md](test_recommendations.md) |
 | `tests/test_memory.py` | [test_memory.md](test_memory.md) |
 | `tests/test_agent.py` | [test_agent.md](test_agent.md) |
+| `tests/test_routing.py` | [test_routing.md](test_routing.md) |
+| `tests/test_workflows.py` | [test_workflows.md](test_workflows.md) |
 | `tests/test_end_to_end.py` | [test_end_to_end.md](test_end_to_end.md) |
 
 ## Package initialisers
@@ -59,6 +68,7 @@ its explanation.
 | `app/ui/__init__.py` | [init_app_ui.md](init_app_ui.md) |
 | `app/services/__init__.py` | [init_app_services.md](init_app_services.md) |
 | `app/agent/__init__.py` | [init_app_agent.md](init_app_agent.md) |
+| `app/routing/__init__.py` | [init_app_routing.md](init_app_routing.md) |
 | `app/memory/__init__.py` | [init_app_memory.md](init_app_memory.md) |
 | `app/products/__init__.py` | [init_app_products.md](init_app_products.md) |
 | `app/recommendations/__init__.py` | [init_app_recommendations.md](init_app_recommendations.md) |
@@ -73,10 +83,11 @@ its explanation.
 1. `overall_architecture.md`
 2. `application_workflow.md`
 3. `settings.md` and `chatbot_service.md`
-4. `agent_state.md` → `agent_nodes.md` → `agent_graph.md`
-5. `memory_client.md` → `memory_service.md` → `memory_manager.md`
-6. `product_api.md` → `product_routes.md` → `product_client.md` → `product_service.md`
-7. `recommendation_service.md` → `ollama_client.md`
-8. `streamlit_app.md`
-9. `memory_workflow.md`, `recommendation_workflow.md`, `data_flow.md`
-10. tests and `check_services.md`
+4. `routing_workflow.md` → `query_router.md` → `routing_classifier.md` → `routing_rules.md`
+5. `agent_state.md` → `agent_nodes.md` → `agent_graph.md`
+6. `memory_client.md` → `memory_service.md` → `memory_manager.md`
+7. `product_api.md` → `product_routes.md` → `product_client.md` → `product_service.md`
+8. `recommendation_service.md` → `ollama_client.md`
+9. `streamlit_app.md`
+10. `memory_workflow.md`, `recommendation_workflow.md`, `data_flow.md`
+11. tests and `check_services.md`

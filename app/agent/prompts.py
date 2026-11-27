@@ -34,24 +34,34 @@ Rules:
 - Never invent a budget, brand or feature the customer did not mention.
 """
 
-PREFERENCE_EXTRACTION_SYSTEM_PROMPT = """You decide which customer statements are worth remembering long term.
+CONVERSATION_SYSTEM_PROMPT = """You are a friendly retail shopping assistant for a headphone store.
 
-Return ONLY JSON:
-{"preferences": [
-  {"text": "...", "kind": "persistent" | "temporary", "confidence": 0.0-1.0, "reason": "..."}
-]}
-
-Persistent preferences are stable: preferred brands, preferred product types,
-liked features (wireless, noise cancellation, lightweight), a usual budget range.
-Temporary requirements are one-off: a budget for this purchase, "this time",
-a gift, a trip, a temporary colour, a one-off brand request.
+Answer the customer's general or conversational message directly.
 
 Rules:
-- Write each preference as a short standalone sentence in third person, e.g.
-  "Usually prefers Sony headphones with noise cancellation."
-- Store at most 3 preferences, and only ones stated explicitly by the customer.
-- Do not infer preferences from a single ambiguous product request.
-- If nothing is worth remembering, return {"preferences": []}.
+- Do not claim to have searched the catalogue and do not invent products,
+  prices, stock or ratings.
+- If the message is a greeting, reply briefly and invite a shopping request.
+- If the message asks for a product recommendation, say you can help and ask
+  what they are looking for instead of naming products.
+- Keep the reply under 90 words.
+- Do not claim that a preference was saved.
+"""
+
+COMPARISON_SYSTEM_PROMPT = """You are a helpful retail shopping assistant for headphones.
+
+You will receive products the assistant already recommended in this
+conversation. Explain, compare or elaborate on them as requested.
+
+Rules:
+- Use ONLY the provided products and their listed attributes. Never invent
+  products, prices, ratings or stock.
+- When comparing, name the concrete trade-offs (price, rating, battery,
+  features) and say which suits which use case.
+- When explaining one product, refer to its position in the list.
+- Mention prices in Indian rupees (₹).
+- Keep the reply under 160 words.
+- Do not claim that a preference was saved.
 """
 
 RESPONSE_SYSTEM_PROMPT = """You are a helpful retail shopping assistant for headphones.
@@ -97,17 +107,43 @@ def requirements_user_prompt(
     )
 
 
-def preference_user_prompt(message: str, conversation_history: list[dict]) -> str:
-    """Build the user prompt for preference extraction."""
+def conversation_user_prompt(message: str, conversation_history: list[dict]) -> str:
+    """Build the user prompt for a conversational reply."""
     history_lines = [
         f"{item.get('role', 'user')}: {item.get('content', '')}"
-        for item in conversation_history[-4:]
+        for item in conversation_history[-6:]
     ]
     return (
         "Recent conversation:\n"
-        + ("\n".join(history_lines) or "(none)")
-        + f"\nLatest customer message: {message!r}\n"
-        "Return the JSON preferences object."
+        + ("\n".join(history_lines) or "(new conversation)")
+        + f"\nCurrent customer message: {message!r}\n"
+        "Write the customer-facing reply now."
+    )
+
+
+def comparison_user_prompt(
+    message: str,
+    recommendations: list[dict],
+    requirements: dict | None = None,
+    followup_action: str = "compare",
+) -> str:
+    """Build the user prompt for comparing or explaining earlier products."""
+    product_lines = []
+    for index, product in enumerate(recommendations, start=1):
+        product_lines.append(
+            f"{index}. {product.get('name')} | brand={product.get('brand')} | "
+            f"price=₹{product.get('price')} | rating={product.get('rating')} | "
+            f"wireless={product.get('wireless')} | "
+            f"noise_cancellation={product.get('noise_cancellation')} | "
+            f"features={', '.join(product.get('features', []))}"
+        )
+    return (
+        f"Customer message: {message!r}\n"
+        f"Requested action: {followup_action}\n"
+        f"Earlier requirements: {requirements or '{}'}\n"
+        "Products already recommended (numbered):\n"
+        + ("\n".join(product_lines) or "(none)")
+        + "\nWrite the customer-facing response now."
     )
 
 

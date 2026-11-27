@@ -20,8 +20,14 @@ from app.memory.memory_client import (
     Mem0MCPError,
     Mem0NotConfiguredError,
 )
-from app.memory.memory_manager import MemoryManager, PreferenceCandidate
-from app.memory.memory_service import MemoryService, extract_raw_records
+from app.memory.memory_manager import MemoryManager
+from app.memory.memory_service import (
+    MemoryEventResult,
+    MemoryRecord,
+    MemoryResult,
+    MemoryService,
+    extract_raw_records,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +114,22 @@ def default_tools() -> list[FakeTool]:
                 "required": ["filters"],
             },
         ),
+        FakeTool(
+            "update_memory",
+            {
+                "type": "object",
+                "properties": {
+                    "memory_id": {"type": "string"},
+                    "text": {"type": "string"},
+                    "metadata": {"type": "object"},
+                },
+                "required": ["memory_id"],
+            },
+        ),
+        FakeTool(
+            "get_event_status",
+            {"type": "object", "properties": {"event_id": {"type": "string"}}, "required": ["event_id"]},
+        ),
     ]
 
 
@@ -119,6 +141,7 @@ class FakeMCPSession:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.raise_on_call = raise_on_call
         self.stored: dict[str, list[dict[str, Any]]] = {}
+        self.events: dict[str, dict[str, Any]] = {}
 
     async def list_tools(self) -> FakeListTools:
         return FakeListTools(self.tools)
@@ -139,7 +162,29 @@ class FakeMCPSession:
                 "metadata": arguments.get("metadata", {}),
             }
             self.stored.setdefault(user_id, []).append(record)
-            return FakeResult({"results": [record]})
+            event_id = f"evt-{uuid.uuid4().hex[:8]}"
+            self.events[event_id] = {
+                "id": event_id,
+                "event_type": "ADD",
+                "status": "SUCCEEDED",
+                "results": [
+                    {"id": record["id"], "data": {"memory": content}, "event": "ADD"}
+                ],
+                "error": None,
+            }
+            return FakeResult({"event_id": event_id, "status": "PENDING"})
+
+        if name == "get_event_status":
+            event = self.events.get(arguments["event_id"], {"status": "UNKNOWN", "results": []})
+            return FakeResult(event)
+
+        if name == "update_memory":
+            for records in self.stored.values():
+                for record in records:
+                    if record["id"] == arguments["memory_id"]:
+                        record["memory"] = arguments.get("text", record["memory"])
+                        return FakeResult({"message": "updated"})
+            return FakeResult({"message": "not found"})
 
         if name == "search_memories":
             filters = str(arguments.get("filters", ""))
@@ -200,6 +245,8 @@ def test_tool_discovery(client: Mem0MCPClient) -> None:
         "get_memories",
         "delete_memory",
         "delete_all_memories",
+        "update_memory",
+        "get_event_status",
     }
     add_tool = client.get_tool("add_memory")
     assert add_tool.required == ["messages", "user_id"]
@@ -259,8 +306,8 @@ def test_list_memories(service: MemoryService) -> None:
 def test_delete_memory_verifies_ownership(
     service: MemoryService, fake_session: FakeMCPSession
 ) -> None:
-    added = service.add_memory("customer_001", "Prefers Sony headphones.")
-    memory_id = added.records[0].memory_id
+    service.add_memory("customer_001", "Prefers Sony headphones.")
+    memory_id = service.list_memories("customer_001").records[0].memory_id
     deleted = service.delete_memory("customer_001", memory_id)
     assert deleted.ok, deleted.error
     assert fake_session.stored["customer_001"] == []
@@ -288,13 +335,12 @@ def test_delete_all_memories_is_customer_scoped(
 
 
 def test_update_memory_verifies_ownership(service: MemoryService, fake_session: FakeMCPSession) -> None:
-    added = service.add_memory("customer_001", "Prefers wired headphones.")
-    memory_id = added.records[0].memory_id
-    # The fake server does not implement update_memory, so the service should
-    # report the missing tool rather than pretending success.
+    service.add_memory("customer_001", "Prefers wired headphones.")
+    listed = service.list_memories("customer_001")
+    memory_id = listed.records[0].memory_id
     result = service.update_memory("customer_001", memory_id, "Prefers wireless headphones.")
-    assert not result.ok
-    assert "does not expose" in (result.error or "")
+    assert result.ok, result.error
+    assert "wireless" in service.list_memories("customer_001").records[0].text
 
 
 def test_missing_api_key_is_reported() -> None:
@@ -354,77 +400,76 @@ def test_extract_raw_records_handles_wrapped_payloads() -> None:
 # ---------------------------------------------------------------------------
 # Memory manager rules (mock-only, deterministic)
 # ---------------------------------------------------------------------------
-def test_temporary_preferences_are_not_saved(service: MemoryService) -> None:
+class _StubEventService:
+    """Minimal service stub for event-state tests (no MCP)."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+    def add_memory(self, customer_id: str, text: str, metadata=None, infer: bool = True):
+        return MemoryResult(ok=True, operation="add", event_id="evt_stub")
+
+    def wait_for_event(self, event_id: str, timeout=None, interval=None):
+        return MemoryEventResult(
+            ok=self.status == "SUCCEEDED",
+            event_id=event_id,
+            status=self.status,
+            texts=["User prefers Sony"] if self.status == "SUCCEEDED" else [],
+            error=None if self.status == "SUCCEEDED" else f"event is {self.status}",
+        )
+
+
+def test_temporary_preference_is_rejected_by_policy(service: MemoryService) -> None:
     manager = MemoryManager(service)
-    report = manager.remember(
-        "customer_001",
-        [
-            PreferenceCandidate("Budget of ₹3,000 for this purchase.", kind="temporary"),
-            PreferenceCandidate("Wants JBL instead of Sony this time.", kind="temporary"),
-        ],
-        existing_memories=[],
-    )
+    allowed, reason = manager.should_store("Prefers JBL headphones this time.")
+    assert not allowed
+    assert "temporary" in reason
+    report = manager.remember("customer_001", "Prefers JBL headphones this time.")
     assert report.saved == []
-    assert len(report.skipped) == 2
     assert service.list_memories("customer_001").records == []
 
 
-def test_temporary_wording_is_rejected_even_if_labelled_persistent(service: MemoryService) -> None:
+def test_budget_only_preference_needs_stable_wording(service: MemoryService) -> None:
+    manager = MemoryManager(service)
+    assert not manager.should_store("Budget under ₹3,000.")[0]
+    assert manager.should_store("I usually have a budget around ₹5,000.")[0]
+
+
+def test_vague_statement_is_not_stored(service: MemoryService) -> None:
+    manager = MemoryManager(service)
+    allowed, reason = manager.should_store("Show me some options")
+    assert not allowed
+    assert "stable preference" in reason
+
+
+def test_persistent_preference_is_saved_after_event_completes(
+    service: MemoryService, fake_session: FakeMCPSession
+) -> None:
     manager = MemoryManager(service)
     report = manager.remember(
-        "customer_001",
-        [PreferenceCandidate("Prefers JBL headphones this time.", kind="persistent", confidence=0.9)],
-        existing_memories=[],
+        "customer_001", "I usually prefer Sony headphones with noise cancellation."
     )
-    assert report.saved == []
-    assert "temporary wording" in report.skipped[0]
-
-
-def test_budget_only_candidate_needs_stable_wording(service: MemoryService) -> None:
-    manager = MemoryManager(service)
-    one_off = manager.remember(
-        "customer_001",
-        [PreferenceCandidate("Budget under ₹3,000.", kind="persistent", confidence=0.95)],
-        existing_memories=[],
-    )
-    assert one_off.saved == []
-    assert "one-off budget" in one_off.skipped[0]
-
-    usual = manager.remember(
-        "customer_001",
-        [
-            PreferenceCandidate(
-                "Usually has a budget around ₹5,000.",
-                kind="persistent",
-                confidence=0.9,
-            )
-        ],
-        existing_memories=[],
-    )
-    assert usual.saved == ["Usually has a budget around ₹5,000."]
-
-
-def test_persistent_preference_is_saved(service: MemoryService, fake_session: FakeMCPSession) -> None:
-    manager = MemoryManager(service)
-    report = manager.remember(
-        "customer_001",
-        [PreferenceCandidate("Usually prefers Sony headphones with noise cancellation.", confidence=0.9)],
-        existing_memories=[],
-    )
+    assert report.status == "success", report.failures
     assert report.saved
-    assert service.list_memories("customer_001").records[0].text.startswith("Usually prefers Sony")
-
-
-def test_duplicate_preference_is_not_saved_twice(service: MemoryService) -> None:
-    manager = MemoryManager(service)
-    candidate = PreferenceCandidate("Usually prefers Sony headphones.", confidence=0.95)
-    first = manager.remember("customer_001", [candidate], existing_memories=[])
-    second = manager.remember(
-        "customer_001", [candidate], existing_memories=["Usually prefers Sony headphones."]
+    assert service.list_memories("customer_001").records[0].text.startswith(
+        "I usually prefer Sony"
     )
-    assert first.saved
-    assert second.saved == []
-    assert "already remembered" in second.skipped[0]
+
+
+def test_pending_event_is_not_reported_as_saved(service: MemoryService) -> None:
+    manager = MemoryManager(_StubEventService("PENDING"))  # type: ignore[arg-type]
+    report = manager.remember("customer_001", "I usually prefer Sony headphones.")
+    assert report.saved == []
+    assert report.pending
+    assert report.status == "pending"
+
+
+def test_failed_event_is_reported_as_failure(service: MemoryService) -> None:
+    manager = MemoryManager(_StubEventService("FAILED"))  # type: ignore[arg-type]
+    report = manager.remember("customer_001", "I usually prefer Sony headphones.")
+    assert report.saved == []
+    assert report.failures
+    assert report.status == "error"
 
 
 def test_memory_write_failure_is_reported(settings: Settings) -> None:
@@ -432,14 +477,120 @@ def test_memory_write_failure_is_reported(settings: Settings) -> None:
     client = Mem0MCPClient(settings=settings, client_factory=lambda: session)
     service = MemoryService(client=client, settings=settings)
     manager = MemoryManager(service)
-    report = manager.remember(
-        "customer_001",
-        [PreferenceCandidate("Always prefers wireless headphones.", confidence=0.9)],
-        existing_memories=[],
-    )
+    report = manager.remember("customer_001", "I always prefer wireless headphones.")
     assert report.saved == []
     assert report.failures
     assert report.status == "error"
+
+
+# ---------------------------------------------------------------------------
+# Async event polling (real service + fake MCP transport)
+# ---------------------------------------------------------------------------
+def test_add_memory_returns_event_and_wait_succeeds(service: MemoryService) -> None:
+    added = service.add_memory("customer_001", "Usually prefers Sony headphones.")
+    assert added.ok
+    assert added.event_id
+    assert added.event_status == "PENDING"
+    event = service.wait_for_event(added.event_id)
+    assert event.ok
+    assert event.status == "SUCCEEDED"
+    assert event.texts
+
+
+def test_event_timeout_is_pending_not_success(service: MemoryService, fake_session: FakeMCPSession) -> None:
+    added = service.add_memory("customer_001", "Usually prefers Sony headphones.")
+    fake_session.events[added.event_id]["status"] = "PENDING"
+    event = service.wait_for_event(added.event_id, timeout=0, interval=0)
+    assert not event.ok
+    assert event.status == "PENDING"
+    assert "timeout" in (event.error or "")
+
+
+def test_missing_event_status_tool_is_reported(settings: Settings) -> None:
+    tools = [tool for tool in default_tools() if tool.name != "get_event_status"]
+    session = FakeMCPSession(tools=tools)
+    client = Mem0MCPClient(settings=settings, client_factory=lambda: session)
+    service = MemoryService(client=client, settings=settings)
+
+    added = service.add_memory("customer_001", "Usually prefers Sony headphones.")
+    assert added.event_id
+    event = service.wait_for_event(added.event_id, timeout=5, interval=0)
+    assert not event.ok
+    assert event.status == "UNKNOWN"
+    assert "does not expose" in (event.error or "")
+
+
+def test_failed_event_surfaces_its_error(service: MemoryService, fake_session: FakeMCPSession) -> None:
+    added = service.add_memory("customer_001", "Usually prefers Sony headphones.")
+    fake_session.events[added.event_id].update(
+        {"status": "FAILED", "error": "extraction failed"}
+    )
+    event = service.wait_for_event(added.event_id, timeout=0, interval=0)
+    assert not event.ok
+    assert event.status == "FAILED"
+    assert event.error == "extraction failed"
+
+
+# ---------------------------------------------------------------------------
+# Corrections operate only on retrieved ids
+# ---------------------------------------------------------------------------
+def test_delete_correction_targets_only_matching_records(
+    service: MemoryService, fake_session: FakeMCPSession
+) -> None:
+    service.add_memory("customer_001", "Usually prefers Sony headphones.")
+    service.add_memory("customer_001", "Usually prefers JBL earbuds.")
+    candidates = service.list_memories("customer_001").records
+    manager = MemoryManager(service)
+
+    plan = manager.correction_plan("Forget that I prefer Sony.", candidates)
+    assert plan.mode == "delete"
+    assert plan.old_brand == "Sony"
+    assert [record.memory_id for record in plan.targets] == [candidates[0].memory_id]
+
+    actions = manager.apply_correction("customer_001", plan)
+    assert actions[0].status == "deleted"
+    assert service.list_memories("customer_001").records[0].text.startswith("Usually prefers JBL")
+
+
+def test_replace_correction_rewrites_the_stored_preference(
+    service: MemoryService, fake_session: FakeMCPSession
+) -> None:
+    service.add_memory("customer_001", "User prefers Sony headphones.")
+    candidates = service.list_memories("customer_001").records
+    manager = MemoryManager(service)
+
+    plan = manager.correction_plan("I prefer JBL, not Sony.", candidates)
+    assert plan.mode == "replace"
+    assert plan.old_brand == "Sony"
+    assert plan.new_brand == "JBL"
+
+    actions = manager.apply_correction("customer_001", plan)
+    assert actions[0].status == "saved"
+    assert "JBL" in service.list_memories("customer_001").records[0].text
+
+
+def test_correction_without_a_matching_record_changes_nothing(
+    service: MemoryService, fake_session: FakeMCPSession
+) -> None:
+    service.add_memory("customer_001", "Usually prefers Sony headphones.")
+    candidates = service.list_memories("customer_001").records
+    manager = MemoryManager(service)
+
+    plan = manager.correction_plan("Forget that I prefer Bose.", candidates)
+    assert plan.targets == []
+    actions = manager.apply_correction("customer_001", plan)
+    assert actions[0].status == "not_found"
+    assert len(service.list_memories("customer_001").records) == 1
+
+
+def test_invented_memory_id_cannot_be_deleted(
+    service: MemoryService, fake_session: FakeMCPSession
+) -> None:
+    service.add_memory("customer_001", "Usually prefers Sony headphones.")
+    result = service.delete_memory("customer_001", "invented-id")
+    assert not result.ok
+    assert "does not belong" in (result.error or "")
+    assert service.list_memories("customer_001").records
 
 
 # ---------------------------------------------------------------------------
@@ -465,11 +616,13 @@ def test_live_mem0_add_search_isolation_and_delete() -> None:
 
         added = service.add_memory(customer, f"{probe_marker}: {text}")
         assert added.ok, added.error
+        assert added.event_id, "add_memory must return an event id"
 
-        # Mem0 extraction is asynchronous; allow a short moment before searching.
-        import time
+        # Mem0 extraction is asynchronous: wait for the real event instead of
+        # sleeping and hoping the memory exists.
+        event = service.wait_for_event(added.event_id)
+        assert event.ok, f"{event.status}: {event.error}"
 
-        time.sleep(3)
         found = service.search_memories(customer, "Sony headphones noise cancellation")
         assert found.ok, found.error
         assert any("Sony" in record.text for record in found.records)

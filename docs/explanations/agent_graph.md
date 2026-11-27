@@ -1,129 +1,93 @@
 # `app/agent/graph.py`
 
-## 1. File purpose
+## 1. Purpose
 
-Builds and compiles the single LangGraph workflow and wires production services.
-It defines node order, the checkpointer and the process-wide graph singleton.
+Compiles the routed LangGraph workflow. `route_query` plans the turn; shared
+conditional edges execute only the planned nodes.
 
-## 2. Imports and dependencies
+## 2. Imports
 
 | Import | Why |
 |---|---|
-| `functools.lru_cache`, `partial` | Cache the graph; bind dependencies to node functions |
-| `langgraph.checkpoint.memory.InMemorySaver` | Per-session conversation state |
-| `langgraph.graph.START`, `END`, `StateGraph` | Graph construction |
-| `app.agent.nodes` | Node functions |
-| `WorkflowDeps` | Service bundle |
-| `AgentState` | State schema |
-| `get_settings` | Configuration |
-| `OllamaClient` | Default LLM |
-| `MemoryManager` | Default memory rules |
-| `get_memory_service` | Process-wide MCP-backed memory service |
-| `ProductService` | Default product access |
+| `functools.lru_cache`, `partial` | One compiled graph per process; inject deps |
+| `langgraph.checkpoint.memory.InMemorySaver` | Per-session conversation checkpoints |
+| `langgraph.graph.END`, `START`, `StateGraph` | Graph construction |
+| `app.agent.nodes`, `WorkflowDeps`, `AgentState` | Nodes, dependencies, state |
+| `app.config.settings.get_settings` | Configuration |
+| `OllamaClient`, `MemoryManager`, `get_memory_service`, `ProductService` | Production services |
+| `QueryRouter` | Jev/rules classifier |
 
-## 3. Classes
-
-No classes are defined. The file exposes functions and a compiled graph object.
-
-## 4. Functions and methods
+## 3. Functions
 
 ### `build_default_deps() -> WorkflowDeps`
-Creates the production bundle:
-- one `MemoryService` singleton (`get_memory_service()`), so one MCP session per
-  process;
-- `ProductService()` (HTTP client, cached brands);
-- `OllamaClient()`;
-- `get_settings()`;
-- `MemoryManager(memory_service)`.
 
-### `build_graph(deps=None, checkpointer=None) -> Any`
-Parameters:
-- `deps` — injectable services (tests use fakes); defaults to production.
-- `checkpointer` — defaults to `InMemorySaver()`.
+Creates the production bundle: the process-wide `MemoryService` (one MCP
+session), a `ProductService`, an `OllamaClient`, settings, a `MemoryManager` and
+a `QueryRouter`.
 
-Implementation:
-```python
-builder = StateGraph(AgentState)
-builder.add_node("prepare_turn", partial(nodes.prepare_turn, deps=deps))
-...
-builder.add_edge(START, "prepare_turn")
-...
-builder.add_edge("update_memory", END)
-return builder.compile(checkpointer=checkpointer)
-```
+### `dispatch_map() -> dict[str, str]`
 
-Returns a compiled graph invoked as:
-```python
-graph.invoke(state, config={"configurable": {"thread_id": session_id}})
-```
+Maps every allowlisted node name to itself and `END` to `END`. Every destination
+`nodes.next_step` can return is registered here.
 
-`partial(..., deps=deps)` produces a one-argument callable `(state) -> dict`, which
-is the LangGraph node signature.
+### `build_graph(deps=None, checkpointer=None) -> CompiledGraph`
 
-### `get_graph() -> Any`
-`@lru_cache(maxsize=1)`; returns the shared compiled graph for `chatbot_service`.
-Caching is important for Streamlit: the graph (and its checkpointer) must persist
-across reruns so follow-up messages see the same thread state.
+Registers nine nodes:
 
-## 5. Execution workflow
+`prepare_turn`, `route_query`, `manage_memory`, `retrieve_memory`,
+`understand_request`, `search_products`, `recommend_products`,
+`generate_response`, `finalize_turn`.
+
+Edges:
 
 ```
-build_graph(deps, checkpointer)
-  create StateGraph(AgentState)
-  register 7 nodes
-  add sequential edges START -> ... -> END
-  compile with checkpointer
-  return graph
-
-graph.invoke({customer_id, session_id, user_message},
-             config={"configurable": {"thread_id": session_id}})
-  load/mount checkpoint for thread
-  run nodes in order
-  save final state
+START → prepare_turn → route_query
+route_query        --conditional(next_step)--> any planned node
+manage_memory      --conditional(next_step)--> ...
+retrieve_memory    --conditional(next_step)--> ...
+understand_request --conditional(next_step)--> ...
+search_products    --conditional(next_step)--> ...
+recommend_products --conditional(next_step)--> ...
+generate_response  --conditional(next_step)--> ...
+finalize_turn → END
 ```
 
-## 6. Input and output
+The conditional edges all use the same function, `nodes.next_step`, and the same
+destination map. LangGraph requires a conditional-edge declaration per source
+node; one shared dispatcher removes the combinatorial edge matrix, not the edge
+registration itself.
 
-Input:
-```python
-{"customer_id": "customer_001", "session_id": "s1", "user_message": "Suggest headphones"}
-```
+### `get_graph() -> CompiledGraph`
 
-Output: the final `AgentState` mapping (response, recommendations, memory writes,
-statuses, errors).
+`lru_cache(maxsize=1)`; used by `chatbot_service`. Tests build their own graph
+with fakes.
 
-## 7. Interaction with other modules
+## 4. Checkpointing
 
-- `chatbot_service.process_message` calls `get_graph()`.
-- Nodes call memory, product, LLM and recommendation modules through `deps`.
-- No Streamlit import.
+`graph.invoke(..., config={"configurable": {"thread_id": session_id}})`
 
-## 8. Important implementation decisions
+The in-memory saver keeps conversation history, `resolved_requirements` and the
+previous shortlist for follow-ups. Restarting the process clears chat context;
+Mem0 preferences persist.
 
-- One graph, sequential edges: easy to trace and test; no multi-agent complexity.
-- `InMemorySaver` rather than a database: conversation context is intentionally
-  in-process, while long-term memory is Mem0's job.
-- Thread id is the session id, so separate chats never share context.
-- Dependency injection (`WorkflowDeps`) lets tests replace every external service
-  without monkeypatching module globals.
-- The default graph is cached so reruns reuse the checkpointer and the MCP
-  connection.
+## 5. Failure handling
 
-## 9. Example execution
+- A node that raises propagates to `chatbot_service.process_message`, which
+  returns an explicit error response.
+- Routing failures are caught in `route_query` and downgraded to a conversational
+  plan.
+- A malformed plan cannot loop: `next_step` sends unknown steps to
+  `finalize_turn`, and `_consume` truncates the queue at `MAX_VISITED_STEPS`.
+
+## 6. Example
 
 ```python
-from app.agent.graph import get_graph
-graph = get_graph()
+graph = build_graph(deps=make_deps(...))
 state = graph.invoke(
-    {"customer_id": "customer_002", "session_id": "demo-1",
-     "user_message": "Show me JBL headphones under ₹3,000"},
-    config={"configurable": {"thread_id": "demo-1"}},
+    {"customer_id": "customer_001", "session_id": "s1",
+     "user_message": "Show me earbuds under ₹5,000"},
+    config={"configurable": {"thread_id": "s1"}},
 )
-print(state["response"])
-```
-
-For tests:
-```python
-from app.agent.graph import build_graph
-graph = build_graph(deps=fake_deps)   # fresh MemorySaver
+state["visited_steps"]   # prepare_turn, route_query, understand_request, ...
+state["response_kind"]   # "product"
 ```

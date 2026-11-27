@@ -1,123 +1,68 @@
 # `tests/conftest.py`
 
-## 1. File purpose
+## 1. Purpose
 
-Shared pytest fixtures and deterministic fakes. It lets the workflow run with no
-network, no Mem0 account and no Ollama, while still using the real catalogue data.
+Shared fixtures and deterministic fakes so the suite never contacts Mem0, Jev,
+Ollama or HTTP. The fakes implement exactly the methods the workflow uses.
 
-## 2. Imports and dependencies
+## 2. Fixtures
 
-| Import | Why |
+| Fixture | Returns |
 |---|---|
-| `json`, `Path`, `re`, `Any` | Load catalogue, parse prompts |
-| `pytest` | Fixtures |
-| `build_graph`, `WorkflowDeps` | Assemble test graphs |
-| `Settings` | Isolated configuration |
-| `OllamaUnavailableError` | Simulate Ollama failure |
-| `MemoryManager` | Real memory rules with fake service |
-| `MemoryRecord`, `MemoryResult` | Memory shapes |
+| `catalogue` (session scope) | The real `backend/data/products.json` product list |
+| `settings` | `Settings(mem0_api_key="test-key", ...)`; `TYPESAFE_API_KEY` stays empty, so routing uses rules unless a test injects `FakeJev` |
 
-`CATALOGUE_PATH` points at `backend/data/products.json`.
+`make_deps(settings, products, memory=None, llm=None, product_service=None)`
+builds `WorkflowDeps`; `WorkflowDeps.__post_init__` creates the
+`MemoryManager` and `QueryRouter` when not supplied.
 
-## 3. Fixtures
+`make_graph(deps)` compiles a graph with a fresh `InMemorySaver`.
 
-### `catalogue` (session scope)
-Loads the real catalogue once and returns the product list. Tests therefore assert
-against actual sample data, not a second copy.
+## 3. `FakeLLM`
 
-### `settings`
-Returns:
-```python
-Settings(mem0_api_key="test-key", mem0_mcp_url="https://mcp.mem0.ai/mcp",
-         ollama_model="llama3.1", max_recommendations=5, memory_top_k=20)
-```
-The dummy key means tests never depend on a developer's `.env`.
+| Attribute | Purpose |
+|---|---|
+| `requirements`, `requirements_by_message` | JSON returned by `chat_json` |
+| `response` | Text returned by `chat` |
+| `fail_json`, `fail_chat` | Simulate Ollama being down |
+| `chat_json_calls`, `chat_calls` | Call counters |
 
-## 4. Fake classes
+It detects the requirement prompt by its system text and extracts the current
+message from the user prompt. Preference extraction was removed from the
+application, so no preference fake exists.
 
-### `FakeLLM`
-Attributes:
-- `requirements` — default extraction JSON;
-- `requirements_by_message` — per-exact-message extraction JSON;
-- `preferences` — preference extraction result;
-- `response` — generated reply text;
-- `fail_json`, `fail_chat` — force `OllamaUnavailableError`;
-- call counters.
+## 4. `FakeMemoryService`
 
-Methods:
-- `_current_message(messages)` — regex-extracts the quoted customer message from
-  the requirement/preference prompt.
-- `chat_json(messages, temperature=0.1)` — fails if configured; returns the
-  per-message/default requirements when the system prompt contains "shopping
-  requirements", otherwise `{"preferences": ...}`.
-- `chat(messages, json_mode=False, temperature=0.2)` — returns `response` or raises.
+Mirrors the async write contract:
 
-This makes scenario tests read like the real conversation (message → extraction).
+- `search_memories` — increments `search_calls`, returns seeded records or an
+  error when `fail_search`.
+- `add_memory` — records the attempt, creates an event id, and returns
+  `event_id` + `PENDING`. It does **not** store the record yet.
+- `wait_for_event` — `SUCCEEDED` stores the record and returns its id/text;
+  `PENDING`/`FAILED` do not store and report the status (`event_status`).
+- `update_memory` — rewrites a record in the customer scope.
+- `delete_memory` — removes a record in the customer scope; unknown ids fail.
+- `texts_for(customer_id)` — stored texts.
+- `deleted`, `updated`, `added`, `events` — inspection lists.
 
-### `FakeMemoryService`
-Implements the subset of `MemoryService` used by the graph:
-- in-process `{customer: [MemoryRecord]}` store, initially populated only for
-  `customer_001` when memories are supplied;
-- `fail_search` / `fail_add` flags;
-- `added` log of `(customer, text, metadata)`.
+Constructor flags: `memories`, `fail_search`, `fail_add`, `event_status`,
+`fail_delete`, `fail_update`.
 
-Methods:
-- `search_memories(customer, query, limit)` → records for that customer or an error
-  result.
-- `list_memories(customer, limit, page)`.
-- `add_memory(customer, text, metadata, infer)` → appends a record and returns
-  success, or a failure result.
-- `texts_for(customer)` — helper for assertions.
+Seeded memories belong to `customer_001`; other customers start empty, which
+makes isolation tests explicit.
 
-Because records are stored per customer, isolation tests are meaningful.
+## 5. `FakeProductService`
 
-### `FakeProductService`
-Uses the real catalogue list.
-- `available_brands()` → sorted brands or raises `ProductAPIError` when `fail=True`.
-- `fetch_products(category, max_budget, query)` → category/budget filtering (the
-  same superset behaviour as the real service) and records fetch calls.
+Backed by the real catalogue. `available_brands()` returns the catalogue brands;
+`fetch_products(category, max_budget, query)` filters the same way as the API and
+records each call in `fetches`. `fail=True` raises `ProductAPIError`.
 
-## 5. Functions
+## 6. Why these fakes
 
-### `make_deps(settings, products, memory=None, llm=None, product_service=None) -> WorkflowDeps`
-Builds a dependency bundle with fakes; creates `MemoryManager(memory)` so memory
-rules run for real against the fake store.
-
-### `make_graph(deps)`
-Calls `build_graph(deps=deps)` with a fresh `InMemorySaver`, giving each test its own
-conversation state.
-
-## 6. Execution workflow
-
-```
-pytest starts
-  -> catalogue/settings fixtures created as needed
-  -> test builds fakes and deps
-  -> make_graph
-  -> process_message / node calls
-  -> assertions on ChatResponse and fake call logs
-```
-
-## 7. Input and output
-
-Input:
-```python
-deps = make_deps(settings, catalogue, memory=FakeMemoryService(), llm=FakeLLM())
-graph = make_graph(deps)
-```
-
-Output: a compiled graph usable exactly like production.
-
-## 8. Interaction with other modules
-
-Imports application modules under test (graph, nodes, manager, models) but no
-network clients. Test modules import these fakes and helpers.
-
-## 9. Important implementation decisions
-
-- All tests use the real `MemoryManager` and recommendation engine; only external
-  boundaries are faked. This keeps precedence/memory-rule tests meaningful.
-- `requirements_by_message` lets a single graph support multi-turn follow-up tests
-  with different model outputs per message.
-- `fail_search`/`fail_add`/`fail` flags make error-path tests explicit.
-- No live-service fixtures: live tests read the environment and skip themselves.
+- They preserve the real contracts (async events, scoped operations, error
+  shapes), so tests exercise application logic rather than a simplified mock.
+- They make every failure path (pending write, failed event, catalogue error,
+  Ollama outage, memory search failure) reproducible without credentials.
+- Live verification is isolated in `@pytest.mark.live` tests skipped unless
+  `MEM0_API_KEY`/`TYPESAFE_API_KEY` are exported.

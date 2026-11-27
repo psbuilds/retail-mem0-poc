@@ -16,13 +16,23 @@ the Mem0 key.
 | `MEM0_MCP_URL` | `https://mcp.mem0.ai/mcp` | Official hosted MCP endpoint |
 | `MEM0_API_KEY` | empty | Mem0 API key, sent as `Authorization: Token …`; never logged |
 | `MEM0_TIMEOUT_SECONDS` | `30` | MCP connect/call timeout |
+| `MEMORY_EVENT_TIMEOUT_SECONDS` | `15` | Max wait for an async Mem0 write event |
+| `MEMORY_EVENT_POLL_INTERVAL_SECONDS` | `1` | Event polling interval |
+| `TYPESAFE_API_KEY` | empty | Jev API key, sent as `Authorization: Bearer …`; never logged |
+| `JEV_MODEL` | `jev-latest` | Jev model alias |
+| `JEV_BASE_URL` | `https://api.typesafe.ai/v1/systemone` | System One endpoint |
+| `JEV_TIMEOUT_SECONDS` | `2` | Router timeout before the rules fallback |
+| `ROUTER_USE_JEV` | `true` | Force deterministic rules mode when false |
+| `ROUTER_CONFIDENCE_THRESHOLD` | `0.5` | Noul/Choice decision threshold |
+| `ROUTER_SEND_HISTORY_TURNS` | `2` | Prior turns sent to Jev |
 | `APP_ENV` | `development` | Environment label |
 | `MAX_RECOMMENDATIONS` | `5` | Number of ranked products returned |
 | `MEMORY_TOP_K` | `20` | Memory search/listing limit |
 
 `app/config/settings.py` reads these with `pydantic-settings`. Missing
 `MEM0_API_KEY` is not fatal: memory is reported as unavailable and the rest of the
-workflow still runs (the key is required for all memory operations).
+workflow still runs. Missing `TYPESAFE_API_KEY` is also not fatal: the router runs
+in deterministic rules mode and the UI says so.
 
 ## `.gitignore`
 

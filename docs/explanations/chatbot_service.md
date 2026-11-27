@@ -36,11 +36,19 @@ Structured result of one turn.
 | `recommendations` | `list[dict]` | Catalogue products, unchanged |
 | `memory_status` | `str` | `success`, `empty`, `error`, `not_configured`, `unknown` |
 | `memory_saved` | `list[str]` | Texts confirmed saved through MCP |
-| `memory_writes` | `dict` | Full report: status/saved/skipped/failures/attempted |
+| `memory_pending` | `list[str]` | Texts Mem0 accepted but has not finished |
+| `memory_writes` | `dict` | Full report: status/saved/pending/skipped/failures/attempted |
+| `memory_actions` | `list[dict]` | Per-operation verified outcome (add/update/delete) |
+| `memory_events` | `list[dict]` | Event ids with their final status |
 | `requirements` | `dict` | Resolved requirements |
 | `relaxed_preferences` | `list[str]` | Memory filters relaxed for an empty result |
 | `product_status` | `str` | `success`, `empty`, `error`, `unknown` |
 | `llm_status` | `str` | `success`, `degraded`, `error`, `unknown` |
+| `route` | `dict` | Serialised `RouteDecision` (flags, probabilities, source, confident) |
+| `route_guards` | `list[str]` | Deterministic guards applied after Jev |
+| `router_usage` | `dict` | Model, input tokens, latency |
+| `response_kind` | `str` | Which response mode ran |
+| `execution_path` | `list[str]` | Nodes actually visited |
 | `errors` | `list[str]` | Diagnostics; never hidden |
 
 No constructor logic beyond model defaults; validation happens in `process_message`.
@@ -157,7 +165,13 @@ ChatResponse(
 
 - Failures are returned, not raised, so a frontend can always render something.
 - `memory_saved` is sourced from the graph's write report, which only contains
-  MCP-confirmed successes.
+  writes whose Mem0 event reported `SUCCEEDED` (pending writes go to
+  `memory_pending`, never `memory_saved`).
+- `check_services()` also reports router mode (`Jev router ready` or
+  `Deterministic rules mode`).
+- `memory_actions` carries each add/update/delete with its verified status.
+- `execution_path` exposes which nodes ran, which makes routing testable from
+  the public API as well as from graph state.
 - Identifier validation prevents an empty or path-like customer id from reaching
   the memory layer.
 - Future FastAPI compatibility: the signature and return model are transport

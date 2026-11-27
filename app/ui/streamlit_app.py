@@ -83,6 +83,7 @@ def render_status_sidebar() -> None:
         ("Mem0 MCP", "memory"),
         ("Ollama", "ollama"),
         ("Product API", "product_api"),
+        ("Query router", "router"),
     ):
         entry = status.get(key, {})
         if entry.get("ok"):
@@ -238,6 +239,26 @@ def render_assistant_message(message: dict) -> None:
     elif meta.get("memory_writes", {}).get("status") == "no_new_memories":
         st.caption("Nothing new to remember from this turn.")
 
+    pending = meta.get("memory_pending") or []
+    if pending:
+        st.warning(
+            "Mem0 is still processing, so this is not confirmed as saved: "
+            + "; ".join(pending)
+        )
+
+    failures = (meta.get("memory_writes") or {}).get("failures") or []
+    if failures:
+        st.error("Memory operation failed: " + "; ".join(failures))
+
+    route = meta.get("route") or {}
+    if route:
+        st.caption(
+            f"Route: {route.get('intent', 'unknown')} · "
+            f"{route.get('source', 'unknown')} · "
+            f"products={route.get('wants_products')} · "
+            f"memory={route.get('needs_personalisation')}"
+        )
+
     if meta.get("relaxed_preferences"):
         st.caption(
             "Relaxed remembered preference because no product matched: "
@@ -288,7 +309,11 @@ def render_chat(customer_id: str) -> None:
             "recommendations": result.recommendations,
             "meta": {
                 "memory_saved": result.memory_saved,
+                "memory_pending": result.memory_pending,
                 "memory_writes": result.memory_writes,
+                "route": result.route,
+                "route_guards": result.route_guards,
+                "router_usage": result.router_usage,
                 "memory_status": result.memory_status,
                 "llm_status": result.llm_status,
                 "product_status": result.product_status,

@@ -12,6 +12,7 @@ different user.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -52,6 +53,25 @@ class MemoryResult:
     error: str | None = None
     tool: str | None = None
     raw: Any = None
+    # Asynchronous writes: ``add_memory`` returns PENDING plus this event id.
+    event_id: str | None = None
+    event_status: str | None = None
+
+
+@dataclass
+class MemoryEventResult:
+    """Outcome of polling one Mem0 memory operation event.
+
+    Only ``status == "SUCCEEDED"`` (or ``COMPLETED``) means the write landed.
+    ``ok`` is the single signal callers may use to claim success.
+    """
+
+    ok: bool
+    event_id: str
+    status: str = "UNKNOWN"
+    memory_ids: list[str] = field(default_factory=list)
+    texts: list[str] = field(default_factory=list)
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,9 +84,47 @@ class MemoryServiceStatus:
     tools: list[str] = field(default_factory=list)
 
 
+# Status values observed from Mem0's ``get_event_status`` tool.
+_SUCCESS_EVENT_STATUSES = {"SUCCEEDED", "COMPLETED", "DONE"}
+_FAILED_EVENT_STATUSES = {"FAILED", "ERROR", "CANCELLED", "CANCELED"}
+
+
 def _user_filter(customer_id: str) -> dict[str, Any]:
     """Build the documented Mem0 filter for one user."""
     return {"AND": [{"user_id": customer_id}]}
+
+
+def _parse_event_payload(event_id: str, payload: Any) -> MemoryEventResult:
+    """Convert an event payload into a MemoryEventResult.
+
+    Observed shape::
+
+        {"id": ..., "status": "SUCCEEDED", "error": null,
+         "results": [{"id": ..., "data": {"memory": ...}, "event": "ADD"}]}
+    """
+    data = payload if isinstance(payload, dict) else {}
+    status = str(data.get("status") or "UNKNOWN").upper()
+    memory_ids: list[str] = []
+    texts: list[str] = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("id"):
+            memory_ids.append(str(item["id"]))
+        body = item.get("data")
+        text = body.get("memory") if isinstance(body, dict) else None
+        if isinstance(text, str) and text.strip():
+            texts.append(text.strip())
+    error = data.get("error")
+    ok = status in _SUCCESS_EVENT_STATUSES
+    return MemoryEventResult(
+        ok=ok,
+        event_id=event_id,
+        status=status,
+        memory_ids=memory_ids,
+        texts=texts,
+        error=str(error) if error else None,
+    )
 
 
 def _first_present(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
@@ -217,13 +275,68 @@ class MemoryService:
             return MemoryResult(ok=False, operation="add", error=str(exc), tool="add_memory")
 
         records = self._records_from_result(result, customer_id)
+        payload = result.payload if isinstance(result.payload, dict) else {}
+        event_id = _first_present(payload, ("event_id", "id"))
+        event_status = _first_present(payload, ("status",))
         return MemoryResult(
             ok=True,
             operation="add",
             records=records,
             tool=result.tool,
             raw=result.payload,
+            event_id=str(event_id) if event_id else None,
+            event_status=str(event_status) if event_status else None,
         )
+
+    def get_event_status(self, event_id: str) -> MemoryEventResult:
+        """Read the current state of a Mem0 memory operation event."""
+        if not event_id:
+            return MemoryEventResult(ok=False, event_id="", error="event_id is required")
+        try:
+            result = self.client.call_tool("get_event_status", {"event_id": event_id})
+        except Mem0MCPError as exc:
+            return MemoryEventResult(ok=False, event_id=event_id, error=str(exc))
+        return _parse_event_payload(event_id, result.payload)
+
+    def wait_for_event(
+        self,
+        event_id: str,
+        timeout: float | None = None,
+        interval: float | None = None,
+    ) -> MemoryEventResult:
+        """Poll ``get_event_status`` until the event finishes or times out.
+
+        A timeout is reported as ``PENDING`` - never as success.  Mem0's ADD
+        events complete asynchronously (observed latency is a few seconds).
+        """
+        if not event_id:
+            return MemoryEventResult(ok=False, event_id="", error="event_id is required")
+        deadline = time.monotonic() + (
+            timeout if timeout is not None else self.settings.memory_event_timeout_seconds
+        )
+        wait = (
+            interval
+            if interval is not None
+            else self.settings.memory_event_poll_interval_seconds
+        )
+        last = MemoryEventResult(ok=False, event_id=event_id, status="PENDING")
+        while True:
+            last = self.get_event_status(event_id)
+            if last.ok or last.status in _FAILED_EVENT_STATUSES:
+                return last
+            if last.status == "UNKNOWN" and last.error:
+                # The status tool is unavailable or the payload is unusable;
+                # polling again cannot help, so report it instead of stalling.
+                return last
+            if time.monotonic() >= deadline:
+                last.ok = False
+                if not last.error:
+                    last.error = (
+                        f"Mem0 memory event {event_id} is still {last.status} after "
+                        f"the polling timeout"
+                    )
+                return last
+            time.sleep(max(0.0, wait))
 
     def search_memories(
         self,
@@ -309,7 +422,12 @@ class MemoryService:
         memory_id: str,
         text: str,
     ) -> MemoryResult:
-        """Overwrite a memory's text after verifying customer ownership."""
+        """Overwrite a memory's text after verifying customer ownership.
+
+        The live tool takes ``memory_id`` plus optional ``text``/``metadata``
+        (verified against the MCP input schema); no customer scope is accepted
+        by the tool, so ownership is checked first through a scoped list.
+        """
         if not text.strip():
             return MemoryResult(ok=False, operation="update", error="New text is required")
         try:

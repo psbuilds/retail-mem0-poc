@@ -20,7 +20,7 @@ from app.agent.nodes import WorkflowDeps
 from app.config.settings import Settings
 from app.llm.ollama_client import OllamaUnavailableError
 from app.memory.memory_manager import MemoryManager
-from app.memory.memory_service import MemoryRecord, MemoryResult
+from app.memory.memory_service import MemoryEventResult, MemoryRecord, MemoryResult
 
 CATALOGUE_PATH = Path(__file__).resolve().parents[1] / "backend" / "data" / "products.json"
 
@@ -95,13 +95,21 @@ class FakeLLM:
 
 
 class FakeMemoryService:
-    """In-process memory stub that mimics MemoryService's contract."""
+    """In-process memory stub that mimics MemoryService's contract.
+
+    Writes are asynchronous in the real service: ``add_memory`` returns an
+    event id and only ``wait_for_event`` decides whether the memory lands.
+    ``event_status`` lets tests exercise saved, pending and failed writes.
+    """
 
     def __init__(
         self,
         memories: list[str] | None = None,
         fail_search: bool = False,
         fail_add: bool = False,
+        event_status: str = "SUCCEEDED",
+        fail_delete: bool = False,
+        fail_update: bool = False,
     ) -> None:
         self._memories: dict[str, list[MemoryRecord]] = {
             "customer_001": [
@@ -111,7 +119,14 @@ class FakeMemoryService:
         }
         self.fail_search = fail_search
         self.fail_add = fail_add
+        self.event_status = event_status
+        self.fail_delete = fail_delete
+        self.fail_update = fail_update
         self.added: list[tuple[str, str, dict[str, Any] | None]] = []
+        self.events: dict[str, tuple[str, dict[str, Any]]] = {}
+        self.search_calls = 0
+        self.deleted: list[str] = []
+        self.updated: list[tuple[str, str]] = []
 
     def _for(self, customer_id: str) -> list[MemoryRecord]:
         return self._memories.setdefault(customer_id, [])
@@ -119,6 +134,7 @@ class FakeMemoryService:
     def search_memories(
         self, customer_id: str, query: str, limit: int | None = None
     ) -> MemoryResult:
+        self.search_calls += 1
         if self.fail_search:
             return MemoryResult(
                 ok=False, operation="search", error="Mem0 MCP connection refused"
@@ -141,11 +157,70 @@ class FakeMemoryService:
         if self.fail_add:
             return MemoryResult(ok=False, operation="add", error="Mem0 MCP write failed")
         self.added.append((customer_id, text, metadata))
+        event_id = f"evt_{len(self.added)}"
+        memory_id = f"mem_{len(self.added)}"
         record = MemoryRecord(
-            memory_id=f"mem_{len(self.added)}", text=text, user_id=customer_id
+            memory_id=memory_id, text=text, user_id=customer_id, metadata=metadata or {}
         )
-        self._for(customer_id).append(record)
-        return MemoryResult(ok=True, operation="add", records=[record])
+        self.events[event_id] = (customer_id, record)
+        return MemoryResult(
+            ok=True,
+            operation="add",
+            tool="add_memory",
+            event_id=event_id,
+            event_status="PENDING",
+        )
+
+    def wait_for_event(self, event_id: str, timeout: float | None = None, interval: float | None = None) -> MemoryEventResult:
+        customer_id, record = self.events[event_id]
+        if self.event_status != "SUCCEEDED":
+            return MemoryEventResult(
+                ok=False,
+                event_id=event_id,
+                status=self.event_status,
+                error=("Mem0 event failed" if self.event_status == "FAILED" else None),
+            )
+        if record not in self._for(customer_id):
+            self._for(customer_id).append(record)
+        return MemoryEventResult(
+            ok=True,
+            event_id=event_id,
+            status="SUCCEEDED",
+            memory_ids=[record.memory_id],
+            texts=[record.text],
+        )
+
+    def update_memory(self, customer_id: str, memory_id: str, text: str) -> MemoryResult:
+        if self.fail_update:
+            return MemoryResult(ok=False, operation="update", error="Mem0 update failed")
+        for index, record in enumerate(self._for(customer_id)):
+            if record.memory_id == memory_id:
+                self._for(customer_id)[index] = MemoryRecord(
+                    memory_id=record.memory_id,
+                    text=text,
+                    metadata=record.metadata,
+                    user_id=customer_id,
+                )
+                self.updated.append((memory_id, text))
+                return MemoryResult(ok=True, operation="update", records=[self._for(customer_id)[index]])
+        return MemoryResult(
+            ok=False, operation="update", error=f"Memory {memory_id} does not belong to {customer_id}"
+        )
+
+    def delete_memory(self, customer_id: str, memory_id: str) -> MemoryResult:
+        if self.fail_delete:
+            return MemoryResult(ok=False, operation="delete", error="Mem0 delete failed")
+        records = self._for(customer_id)
+        remaining = [record for record in records if record.memory_id != memory_id]
+        if len(remaining) == len(records):
+            return MemoryResult(
+                ok=False,
+                operation="delete",
+                error=f"Memory {memory_id} does not belong to {customer_id}",
+            )
+        self._memories[customer_id] = remaining
+        self.deleted.append(memory_id)
+        return MemoryResult(ok=True, operation="delete")
 
     def texts_for(self, customer_id: str) -> list[str]:
         return [record.text for record in self._for(customer_id)]

@@ -70,18 +70,6 @@ def test_current_request_overrides_persistent_memory(
                 "max_budget": 3000,
             }
         },
-        preferences=[
-            {
-                "text": "Budget of ₹3,000 for this purchase.",
-                "kind": "temporary",
-                "confidence": 0.9,
-            },
-            {
-                "text": "Prefers JBL headphones this time.",
-                "kind": "temporary",
-                "confidence": 0.9,
-            },
-        ],
     )
     graph = make_graph(make_deps(settings, catalogue, memory=memory, llm=llm))
 
@@ -95,35 +83,33 @@ def test_current_request_overrides_persistent_memory(
     assert result.recommendations
     assert all(item["brand"] == "JBL" for item in result.recommendations)
     assert all(item["price"] <= 3000 for item in result.recommendations)
-    # Temporary budget/brand must not be persisted.
+    # A temporary, purchase-scoped request must not be persisted.
     assert result.memory_saved == []
-    assert "temporary requirement" in " ".join(result.memory_writes["skipped"])
+    assert result.memory_actions == []
     assert memory.added == []
 
 
 def test_persistent_preference_is_saved(settings, catalogue: list[dict[str, Any]]) -> None:
     memory = FakeMemoryService()
     llm = FakeLLM(
-        requirements={"is_shopping_request": True, "refines_previous_request": False},
-        preferences=[
-            {
-                "text": "Usually prefers Sony headphones with noise cancellation.",
-                "kind": "persistent",
-                "confidence": 0.95,
-            }
-        ],
+        requirements={"is_shopping_request": True, "refines_previous_request": False}
     )
     graph = make_graph(make_deps(settings, catalogue, memory=memory, llm=llm))
+    message = "I usually prefer Sony headphones with noise cancellation."
 
-    result = process_message(
-        "customer_002",
-        "session-d",
-        "I usually prefer Sony headphones with noise cancellation.",
-        graph=graph,
-    )
+    result = process_message("customer_002", "session-d", message, graph=graph)
 
     assert result.ok
-    assert result.memory_saved == ["Usually prefers Sony headphones with noise cancellation."]
+    # Only a verified Mem0 event counts as saved.
+    assert result.memory_saved == [message]
+    assert result.memory_actions[0]["status"] == "saved"
+    assert result.execution_path == [
+        "prepare_turn",
+        "route_query",
+        "manage_memory",
+        "generate_response",
+        "finalize_turn",
+    ]
     assert memory.added and memory.added[0][0] == "customer_002"
 
 
@@ -202,13 +188,14 @@ def test_memory_retrieval_failure_continues(
     llm = FakeLLM(requirements={"is_shopping_request": True, "category": "headphones"})
     graph = make_graph(make_deps(settings, catalogue, memory=memory, llm=llm))
 
-    result = process_message("customer_001", "session-g", "Suggest headphones", graph=graph)
+    result = process_message(
+        "customer_001", "session-g", "Suggest headphones for me", graph=graph
+    )
 
     assert result.ok
     assert result.memory_status == "error"
     assert result.recommendations
     assert result.memory_saved == []
-    assert result.memory_writes["status"] == "skipped"
     assert any("Memory retrieval failed" in error for error in result.errors)
 
 
@@ -252,7 +239,6 @@ def test_ollama_failure_is_reported_and_fallback_used(
     assert all(item["brand"] == "Sony" for item in result.recommendations)
     assert all(item["wireless"] for item in result.recommendations)
     assert "local LLM (Ollama) is unavailable" in result.response
-    assert result.memory_writes["status"] == "error"
     assert any("Ollama" in error for error in result.errors)
 
 

@@ -41,6 +41,20 @@ class Settings(BaseSettings):
     mem0_api_key: str = Field(default="", repr=False)
     mem0_timeout_seconds: float = 30.0
 
+    # Query router (Jev / TypeSafe System One)
+    typesafe_api_key: str = Field(default="", repr=False)
+    jev_base_url: str = "https://api.typesafe.ai/v1/systemone"
+    jev_model: str = "jev-latest"
+    jev_timeout_seconds: float = 2.0
+    jev_retry_attempts: int = 1
+    router_use_jev: bool = True
+    router_confidence_threshold: float = 0.5
+    router_send_history_turns: int = 2
+
+    # Asynchronous Mem0 writes (add_memory returns an event id)
+    memory_event_timeout_seconds: float = 15.0
+    memory_event_poll_interval_seconds: float = 1.0
+
     # Application behaviour
     app_env: str = "development"
     max_recommendations: int = 5
@@ -50,6 +64,11 @@ class Settings(BaseSettings):
     def mem0_configured(self) -> bool:
         """Return True when a Mem0 API key is present (does not validate it)."""
         return bool(self.mem0_api_key.strip())
+
+    @property
+    def jev_configured(self) -> bool:
+        """Return True when a TypeSafe API key is present (does not validate it)."""
+        return bool(self.typesafe_api_key.strip())
 
     def startup_warnings(self) -> list[str]:
         """Return human-readable warnings about missing configuration.
@@ -61,6 +80,11 @@ class Settings(BaseSettings):
         if not self.mem0_configured:
             warnings.append(
                 "MEM0_API_KEY is not set — persistent memory will be unavailable."
+            )
+        if not self.jev_configured:
+            warnings.append(
+                "TYPESAFE_API_KEY is not set — the query router runs in "
+                "deterministic rules mode (no Jev classification)."
             )
         return warnings
 

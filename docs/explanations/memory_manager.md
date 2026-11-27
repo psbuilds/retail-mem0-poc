@@ -1,177 +1,155 @@
 # `app/memory/memory_manager.py`
 
-## 1. File purpose
+## 1. Purpose
 
-Applies the product's memory rules. It decides which extracted candidates may
-become permanent memories, prevents duplicates, and performs writes through
-`MemoryService`. This is the module that keeps "under ₹3,000 this time" from
-becoming a lifetime preference.
+Application memory policy plus truthful reporting. Mem0 performs extraction,
+deduplication, merging and superseding (`infer=true`), so this module no longer
+runs a duplicate Ollama extraction pipeline or fuzzy duplicate detection.
 
-## 2. Imports and dependencies
+Responsibilities:
+
+- decide whether a sentence is a durable preference;
+- decide what a correction/forget request means;
+- select only retrieved records as correction targets;
+- report saved/pending/failed based on the real Mem0 event.
+
+## 2. Imports
 
 | Import | Why |
 |---|---|
-| `re` | Text normalisation |
-| `dataclass`, `field` | Candidate and write-report models |
-| `difflib.SequenceMatcher` | Near-duplicate detection |
-| `MemoryResult`, `MemoryService` | Actual memory writes |
-
-No LLM or MCP import: candidates arrive from the agent node; writes go through the
-service.
+| `re` | Brand rewriting, marker patterns |
+| `dataclass`, `field` | `MemoryAction`, `MemoryWriteReport`, `CorrectionPlan` |
+| `MemoryRecord`, `MemoryResult`, `MemoryService` | Memory operations |
+| `CATALOGUE_BRAND_HINTS`, `brand_polarity` | Deterministic brand polarity |
 
 ## 3. Constants
 
-### `TEMPORARY_MARKERS`
-Phrases such as "this time", "this purchase", "for now", "today", "for a trip",
-"as a gift", "one-time", "only for".
+`TEMPORARY_MARKERS`, `PERSISTENT_MARKERS`, `_MIN_CANDIDATE_LENGTH = 8`,
+`_BUDGET_PATTERN`, `_PRODUCT_TOKEN_PATTERN`, `_STABLE_BUDGET_PATTERN`,
+`_WITHDRAWAL_PATTERN`.
 
-### `PERSISTENT_MARKERS`
-"usually", "always", "generally", "normally", "prefer", "I like", "I love",
-"I tend to", "my favourite", "I'm a fan of".
-
-### Internal thresholds
-- `_MIN_CANDIDATE_LENGTH = 8` normalised characters.
-- `_SIMILARITY_THRESHOLD = 0.82` for `SequenceMatcher`.
-
-## 4. Classes
-
-### `PreferenceCandidate` (frozen dataclass)
-
-| Attribute | Meaning |
-|---|---|
-| `text` | Standalone sentence to remember |
-| `kind` | `persistent` or `temporary` |
-| `confidence` | 0.0–1.0 from the LLM |
-| `reason` | LLM explanation (diagnostics) |
-
-### `MemoryWriteReport`
-
-| Attribute | Meaning |
-|---|---|
-| `saved` | Texts confirmed saved |
-| `skipped` | Texts + reason not saved |
-| `failures` | Text + error for failed writes |
-| `attempted` | Texts sent to Mem0 |
-
-Properties:
-- `ok` → no failures;
-- `status` → `error` (failures and no saves), `partial` (some saved, some failed),
-  `success` (saved), `no_new_memories`.
-
-### `MemoryManager`
-
-`__init__(memory_service=None)` uses a new `MemoryService()` if none is provided.
-
-## 5. Functions and methods
+## 4. Functions
 
 ### `normalise_text(text) -> str`
-Lowercases, replaces punctuation with spaces, collapses whitespace. Used for
-comparisons only; stored text keeps its original wording.
+Lowercase, strip punctuation, collapse whitespace.
 
 ### `is_temporary(text) -> bool`
 True when any temporary marker appears.
 
 ### `has_persistent_marker(text) -> bool`
-True when stable-preference language appears.
+True for stable-preference language.
 
-### `is_duplicate(candidate, existing) -> bool`
-Compares normalised text:
-- exact match;
-- `SequenceMatcher` ratio ≥ 0.82;
-- candidate tokens overlap an existing memory's tokens by ≥ 90% (handles
-  "Prefers Sony headphones" vs a longer memory containing the same core words).
+## 5. Classes
 
-### `MemoryManager.select_persistent(candidates, existing_memories) -> (accepted, skipped_reasons)`
-Accepts a candidate only if:
-1. `kind == "persistent"`;
-2. no temporary marker;
-3. at least 8 normalised characters;
-4. a budget-only sentence must use stable wording ("usually", "normally",
-   "generally", "always") — otherwise it is treated as a one-off budget;
-5. stable wording **or** confidence ≥ 0.7;
-6. not a duplicate of an existing memory or a previously accepted candidate.
+### `MemoryAction`
 
-Returns accepted `PreferenceCandidate`s and human-readable skip reasons.
+| Field | Meaning |
+|---|---|
+| `kind` | `add`, `update`, `delete` |
+| `status` | `saved`, `deleted`, `pending`, `failed`, `not_found`, `skipped` |
+| `text` | Preference text or rewritten text |
+| `memory_id` | Record id for update/delete |
+| `event_id` | Mem0 event id for adds |
+| `error` | Failure detail |
 
-### `MemoryManager.remember(customer_id, candidates, existing_memories) -> MemoryWriteReport`
-- Runs `select_persistent`.
-- For each accepted candidate calls:
-  ```python
-  memory_service.add_memory(
-      customer_id=customer_id,
-      text=candidate.text,
-      metadata={"source": "retail-memory-assistant", "kind": "persistent_preference"},
-  )
-  ```
-- Records real outcomes in `saved` / `failures`.
-- Never marks saved unless `MemoryResult.ok` is true.
+`ok` is true only for `saved`/`deleted`. `as_dict()` serialises for state and UI.
 
-## 6. Execution workflow
+### `MemoryWriteReport`
 
-```
-agent update_memory
-  -> Ollama candidates
-  -> MemoryManager.remember(customer, candidates, existing memory texts)
-       -> select_persistent
-            temporary? -> skip
-            duplicate? -> skip
-            weak wording and low confidence? -> skip
-            else accept
-       -> MemoryService.add_memory (Mem0 MCP)
-  -> MemoryWriteReport -> graph.memory_writes -> UI
-```
+Aggregates actions plus skipped reasons.
 
-## 7. Input and output
+| Property | Meaning |
+|---|---|
+| `saved` | Texts whose write definitely completed |
+| `pending` | Accepted but unfinished |
+| `failures` | `failed` and `not_found` actions |
+| `attempted` | Every text attempted |
+| `ok` | No failures and no pending |
+| `status` | `success`, `pending`, `partial`, `error`, `no_new_memories` |
 
-Input:
+`as_dict()` produces `memory_writes` with `status`, `saved`, `pending`,
+`skipped`, `failures`, `attempted`, `actions`.
+
+### `CorrectionPlan`
+
+`mode` (`delete`/`replace`), `old_brand`, `new_brand`, `targets` (validated
+`MemoryRecord` objects).
+
+### `MemoryManager`
+
+`__init__(memory_service=None)`.
+
+#### `should_store(message) -> (bool, reason)`
+Rejects too-short text, temporary scope, withdrawal instructions, one-off
+budgets without product context/stable wording, and statements without stable
+preference language.
+
+#### `preference_text(message) -> str`
+Splits on sentence punctuation, drops clauses containing a withdrawal verb, and
+returns the remaining preference text. `"Forget Sony. I prefer JBL."` →
+`"I prefer JBL."`; a pure `"Forget that I prefer Sony."` → `""`.
+
+#### `store(customer_id, text, metadata=None) -> MemoryAction`
+Calls `add_memory`, then:
+
+- tool failure → `failed`;
+- no event id → `pending` (completion unverified — never saved);
+- `wait_for_event` success → `saved` with the event's stored text;
+- terminal failure → `failed`;
+- timeout → `pending`.
+
+#### `remember(customer_id, text, metadata=None) -> MemoryWriteReport`
+Applies `should_store`, then `store`. Used by callers that want the aggregate
+report.
+
+#### `correction_plan(message, candidates) -> CorrectionPlan`
+1. Brand list = brands found in candidates ∪ catalogue hints.
+2. `brand_polarity(message, brands)` → preferred/excluded.
+3. Explicit `delete` → the target is the brand named in the withdrawal clause
+   (not a brand introduced afterwards), falling back to excluded/preferred brands;
+   mode `delete`.
+4. Otherwise new = preferred, old = first excluded; if only a new brand is
+   mentioned, the old brand is the first *different* brand in the candidates.
+5. `replace` only when both old and new exist.
+6. Targets = candidates whose text contains a target token, capped at 5. No
+   identifiable target → empty targets (never guess).
+
+#### `apply_correction(customer_id, plan) -> list[MemoryAction]`
+- Empty targets → one `not_found` action with an explanatory error.
+- `replace` → `update_memory` with the old brand rewritten to the new brand.
+- `delete` → `delete_memory` per target.
+- Each action reports the real `MemoryResult`.
+
+## 6. Execution order in a turn
+
+`manage_memory` calls corrections first, then preference storage (unless the
+correction already stored the new preference), so retrieval after this node sees
+the updated memory state.
+
+A message can do both: `"Forget Sony. I prefer JBL."` deletes the Sony record and
+stores `"I prefer JBL."` — the withdrawal clause is stripped before the policy
+check, so the new preference is not silently skipped.
+
+## 7. Error handling
+
+| Situation | Result |
+|---|---|
+| Mem0 rejects the add | `failed` + error |
+| No event id | `pending` + "completion could not be verified" |
+| Event FAILED | `failed` + event error |
+| Event still pending at timeout | `pending` |
+| Correction search fails | `failed` action, nothing changed |
+| No matching record | `not_found`, nothing changed |
+| Update/delete rejected | `failed` with the service error |
+
+A correction is never reported as successful unless the underlying Mem0 call
+succeeded.
+
+## 8. Example
+
 ```python
-candidates = [
-  PreferenceCandidate("Budget of ₹3,000 for this purchase.", kind="temporary"),
-  PreferenceCandidate("Usually prefers Sony headphones.", kind="persistent", confidence=0.95),
-]
-report = manager.remember("customer_001", candidates, existing_memories=[])
-```
-
-Output:
-```python
-MemoryWriteReport(
-  saved=["Usually prefers Sony headphones."],
-  skipped=["Budget of ₹3,000 for this purchase. (temporary requirement)"],
-  failures=[],
-  attempted=["Usually prefers Sony headphones."],
-)
-```
-
-## 8. Interaction with other modules
-
-Called by `agent/nodes.py` (`update_memory`). Calls `MemoryService.add_memory`.
-Its `MemoryWriteReport` becomes `state["memory_writes"]` and `ChatResponse`.
-
-## 9. Important implementation decisions
-
-- No storing of every message: only explicit candidates that pass all rules.
-- Temporary classification is checked both from the LLM label and from wording, so
-  a mislabeled candidate is still rejected.
-- Budget-only memories require stable wording, so a mislabeled "Budget under
-  ₹3,000" cannot become a permanent preference, while "Usually has a budget
-  around ₹5,000" can.
-- Confidence ≥ 0.7 can justify storing a preference phrased without a marker, but
-  ambiguous single requests usually score lower and are skipped.
-- De-duplication compares against both Mem0-retrieved memories and the current
-  batch, preventing repeated writes within one turn.
-- Write failures are surfaced verbatim; the manager never retries with another
-  provider or claims success.
-
-## 10. Example execution
-
-```python
-from app.memory.memory_manager import MemoryManager, PreferenceCandidate
-
-manager = MemoryManager()
-report = manager.remember(
-    "customer_001",
-    [PreferenceCandidate("Usually prefers wireless headphones.", confidence=0.9)],
-    existing_memories=[],
-)
-print(report.status, report.saved)
+manager = MemoryManager(memory_service)
+report = manager.remember("customer_001", "I usually prefer Sony headphones")
+report.status                 # "success" only after the event completes
+report.saved                  # ["User usually prefers Sony headphones"]
 ```

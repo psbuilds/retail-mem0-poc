@@ -41,6 +41,8 @@ and recommendation code are real.
 ## 5. Tests
 
 ### `test_scenario_save_then_recall_across_sessions`
+Stores the customer's sentence (Mem0 owns extraction), asserts the write is only
+saved after its event completes, then recalls it in a brand-new session.
 1. Session 1: "I usually prefer Sony headphones with noise cancellation."
 2. Preference candidate is persistent → `memory_saved` contains it.
 3. Session 2 (new thread, same customer): "Suggest headphones for me."
@@ -50,6 +52,8 @@ and recommendation code are real.
 This mirrors POC scenarios 1 and 2 (with mocked Mem0, clearly labelled).
 
 ### `test_scenario_override_and_temporary_budget`
+A temporary "this time" request is not stored; the current brand/budget still
+win over existing memory.
 Memory holds Sony/ANC. Message asks for JBL under ₹3,000 "this time".
 - Resolved brand/budget come from the current message.
 - Recommendations are exactly the two JBL models under ₹3,000 (the memory-derived
@@ -57,12 +61,16 @@ Memory holds Sony/ANC. Message asks for JBL under ₹3,000 "this time".
 - Nothing is saved; the temporary candidate is rejected.
 
 ### `test_scenario_customer_isolation`
+`customer_001` receives Sony-constrained recommendations; `customer_002` has an
+empty memory scope and receives non-Sony options.
 - `customer_001` receives Sony-constrained recommendations.
 - `customer_002` has an empty memory scope, receives non-Sony options, and is not
   brand-constrained. This demonstrates independent scopes in the fake store and
   the workflow; live Mem0 isolation is covered separately by the live test.
 
 ### `test_empty_catalogue_result_is_explained`
+A Sony request under ₹500 returns no products and a deterministic no-match
+message.
 Sony headphones under ₹500: no matches → empty recommendations and a response
 saying no catalogue product matches. No invented alternative.
 
